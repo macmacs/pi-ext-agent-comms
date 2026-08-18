@@ -71,6 +71,50 @@ just coms-model <model> --name x --cname x
 just team dev prod review                # hub + one tmux window per peer
 ```
 
+## Example prompts (from the Pi to Pi video)
+
+The exact verbatim prompts were never published; these are reconstructed from the video transcript and a community write-up (https://sparsenotes.com/posts/2026/05/2026-05-23-pi-to-pi-agent-orchestration/).
+
+### Demo 1: PII redaction (prod + dev)
+
+prod (Mac mini, gatekeeper):
+
+```
+you are the prod gatekeeper, you have a seeded production DB, you have a teammate on the network, you must not expose PII to any other agent.
+```
+
+dev (MacBook):
+
+```
+bring the affected slice from production over with PII stripped into your local dev DB so an engineer can reproduce the issue locally.
+```
+
+The trust boundary lives only in the prod agent's system prompt; it is never injected into dev's context.
+
+### Demo 2: building an exe.dev skill (expert + driver)
+
+Fresh pool "sandbox", two agents.
+
+E2B expert (GPT-5.5, loaded with the existing E2B skill):
+
+```
+you're the E2B expert, your teammate is exe.dev, answer their questions.
+```
+
+First it generates a compressed feature inventory file of the E2B skill as its own reference.
+
+exe.dev driver (Opus 4.7):
+
+```
+you're the driver. There is no exe.dev skill yet. Build one. Reference target is the E2B skill. Your teammate will answer questions.
+```
+
+The driver/expert split keeps each context at ~20% usage.
+
+### The pattern
+
+Give each agent a role/constraint, name the teammate it can talk to, and define the end state so they don't loop.
+
 ## Role configs (researcher vs reviewer etc.)
 
 Two layers: **directories carry durable config, just carries the launch**.

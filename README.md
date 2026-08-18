@@ -79,6 +79,8 @@ just team dev prod review                        # hub + 3 peers in one tmux ses
 
 Convention: one extension per agent. `coms.ts` for same-machine unix-socket pools, `coms-net.ts` for anything that goes through the hub (same machine, LAN, or sandboxes).
 
+Reconstructed example prompts from the Pi to Pi video: see `PI-MULTI-AGENT.md`.
+
 ## Companion script
 
 `scripts/agent-picker`: fzf tmux popup to see and jump between running coms agents. Bind in tmux:

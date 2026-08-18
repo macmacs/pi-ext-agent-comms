@@ -6,9 +6,7 @@
  * hook to automatically load its designated theme on boot.
  *
  * Available themes (.pi/themes/):
- *   catppuccin-mocha · cyberpunk · dracula · everforest · gruvbox
- *   midnight-ocean   · nord      · ocean-breeze · rose-pine
- *   synthwave        · tokyo-night
+ *   ocean-breeze
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -21,23 +19,8 @@ import { fileURLToPath } from "url";
 // Value = theme name from .pi/themes/<value>.json
 //
 export const THEME_MAP: Record<string, string> = {
-	"agent-chain":        "midnight-ocean",   // deep sequential pipeline
-	"agent-team":         "dracula",          // rich orchestration palette
 	"coms":               "ocean-breeze",     // peer-to-peer messaging, cross-boundary
 	"coms-net":           "ocean-breeze",     // peer-to-peer messaging, cross-boundary
-	"cross-agent":        "ocean-breeze",     // cross-boundary, connecting
-	"damage-control":     "gruvbox",          // grounded, earthy safety
-	"minimal":            "synthwave",        // synthwave by default now!
-	"pi-pi":              "rose-pine",        // warm creative meta-agent
-	"pure-focus":         "everforest",       // calm, distraction-free
-	"purpose-gate":       "tokyo-night",      // intentional, sharp focus
-	"session-replay":     "catppuccin-mocha", // soft, reflective history
-	"subagent-widget":    "cyberpunk",        // multi-agent futuristic
-	"system-select":      "catppuccin-mocha", // soft selection UI
-	"theme-cycler":       "synthwave",        // neon, it's a theme tool
-	"tilldone":           "everforest",       // task-focused calm
-	"tool-counter":       "synthwave",        // techy metrics
-	"tool-counter-widget":"synthwave",        // same family
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -76,13 +59,13 @@ export function applyExtensionTheme(fileUrl: string, ctx: ExtensionContext): boo
 	let themeName = THEME_MAP[name];
 	
 	if (!themeName) {
-		themeName = "synthwave";
+		themeName = "ocean-breeze";
 	}
 
 	const result = ctx.ui.setTheme(themeName);
 	
-	if (!result.success && themeName !== "synthwave") {
-		return ctx.ui.setTheme("synthwave").success;
+	if (!result.success && themeName !== "ocean-breeze") {
+		return ctx.ui.setTheme("ocean-breeze").success;
 	}
 	
 	return result.success;

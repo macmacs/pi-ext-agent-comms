@@ -2,21 +2,16 @@
   "name": "pi-ext-agent-comms",
   "private": true,
   "type": "module",
-  "description": "Merged multi-agent extension set for pi: coms P2P (terakael) + agent-team/agent-chain/pi-pi (TheMule71) + upstream disler/pi-vs-claude-code",
+  "description": "Peer-to-peer agent communication extensions for pi: coms (local unix sockets) + coms-net (HTTP/SSE hub)",
   "keywords": ["pi-package", "pi-extension"],
-  "dependencies": {
-    "yaml": "^2.8.0"
-  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
   "pi": {
-    "extensions": ["./extensions/*.ts", "!./extensions/naming.ts", "!./extensions/example-border-segment.ts"],
-    "skills": ["./.pi/skills"],
+    "extensions": ["./extensions/coms.ts", "./extensions/coms-net.ts"],
     "themes": ["./.pi/themes"]
   }
 }

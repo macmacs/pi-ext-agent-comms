@@ -16,11 +16,11 @@ pi install /Users/macmacs/pi-agen-main/pi-ext-agent-comms
 Or load for one session only:
 
 ```bash
-pi -e extensions/coms.ts
-pi -e extensions/coms.ts -e extensions/coms-net.ts
+pi -e extensions/coms.ts        # local P2P
+pi -e extensions/coms-net.ts   # network hub client
 ```
 
-No runtime dependencies beyond pi's bundled packages.
+No runtime dependencies beyond pi's bundled packages. `just` recipes included (`just --list`).
 
 ## coms (local P2P)
 
@@ -42,20 +42,38 @@ Same tools over HTTP/SSE: `coms_net_list`, `coms_net_send`, `coms_net_get`, `com
 1. Start the hub:
 
 ```bash
-bun scripts/coms-net-server.ts
+just hub          # 127.0.0.1:52965 (override with PI_COMS_NET_PORT)
+just hub-lan      # 0.0.0.0, requires PI_COMS_NET_AUTH_TOKEN
 ```
 
 2. Point agents at it:
 
 ```bash
-pi -e extensions/coms.ts -e extensions/coms-net.ts \
-   --cname mac-agent --project myteam \
-   --server-url http://<hub-host>:8973 --auth-token <token>
+just coms --name mac-agent --cname mac-agent
+# remote peer or sandbox:
+just coms --name e2b-agent --cname e2b-agent \
+     --server-url http://<hub-host>:52965 --auth-token <token>
 ```
 
 Env equivalents: `PI_COMS_NET_SERVER_URL`, `PI_COMS_NET_AUTH_TOKEN`, `PI_COMS_NET_PROJECT`.
 
 Token policy (enforced by the server): loopback bind without token generates one into `~/.pi/coms-net/projects/<project>/server.secret.json` (0600); non-loopback bind without a token refuses to start. Hub state lives in `~/.pi/coms-net/`.
+
+## just recipes
+
+The justfile automates the video-style setups (IndyDevDan's `j` shortcuts):
+
+```bash
+brew install just
+
+just local-coms --name dev --cname dev           # local unix-socket peer
+just hub                                         # hub + agents on one machine
+just coms --name dev --cname dev                 # networked peer (auto-discovers local hub)
+just coms-model openrouter/x-ai/grok-5 --name r1 --cname r1
+just team dev prod review                        # hub + 3 peers in one tmux session
+```
+
+Convention: one extension per agent. `coms.ts` for same-machine unix-socket pools, `coms-net.ts` for anything that goes through the hub (same machine, LAN, or sandboxes).
 
 ## Companion script
 

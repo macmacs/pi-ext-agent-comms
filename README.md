@@ -5,7 +5,11 @@ Peer-to-peer agent communication for the Pi coding agent. Two extensions:
 - **coms** (`extensions/coms.ts`): local agent-to-agent messaging over unix sockets. Flat peer team, no orchestrator. Any agent can ping, prompt, and await responses from any other agent in the pool.
 - **coms-net** (`extensions/coms-net.ts`): the same protocol over a network hub (Bun HTTP/SSE server), for agents on other machines or sandboxes (E2B, exe.dev, etc.).
 
-Sourced from the `coms` work in `disler/pi-vs-claude-code` with the TUI/race fixes from the `terakael` fork, slimmed down to just these two extensions.
+Slimmed down to just these two extensions from three upstream repos:
+
+- [disler/pi-vs-claude-code](https://github.com/disler/pi-vs-claude-code): the original `coms` work (IndyDevDan's "Pi to Pi")
+- [terakael/pi-vs-claude-code](https://github.com/terakael/pi-vs-claude-code): TUI/race fixes
+- [TheMule71/pi-vs-claude-code](https://github.com/TheMule71/pi-vs-claude-code): base fork this repo was forked from
 
 ## Install
 

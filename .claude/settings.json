@@ -1,7 +1,0 @@
-{
-  "statusLine": {
-    "type": "command",
-    "command": "uv run .claude/status_lines/status_line.py",
-    "padding": 0
-  }
-}

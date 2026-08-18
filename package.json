@@ -1,9 +1,22 @@
 {
-  "name": "pi-vs-cc",
+  "name": "pi-ext-agent-comms",
   "private": true,
   "type": "module",
-  "description": "Pi Coding Agent extension playground",
+  "description": "Merged multi-agent extension set for pi: coms P2P (terakael) + agent-team/agent-chain/pi-pi (TheMule71) + upstream disler/pi-vs-claude-code",
+  "keywords": ["pi-package", "pi-extension"],
   "dependencies": {
     "yaml": "^2.8.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions/*.ts", "!./extensions/naming.ts", "!./extensions/example-border-segment.ts"],
+    "skills": ["./.pi/skills"],
+    "themes": ["./.pi/themes"]
   }
 }

@@ -7,6 +7,9 @@ const deny: [RegExp, string][] = [
   [/security\s+find-/, "Reading credentials from the keychain is not allowed."],
   [/git\s+credential\s+fill(\s|$)/, "Reading git credentials is not allowed."],
   [/git\s+push(\s|$)/, "The user will push."],
+  [/pass\s+(?!(?:ls|find|grep|help|version)\b)/, "Reading credentials is not allowed."],
+  [/find\s+\//, "Do not find on the entire system."],
+  [/kubectl\s+get\s+secrets?\s+.*(-o|--output)/, "Reading secrets is not allowed."],
 ];
 
 // Commands to confirm with the user case-by-case in the TUI.

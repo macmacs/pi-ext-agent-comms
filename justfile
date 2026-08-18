@@ -57,6 +57,10 @@ ext-tilldone:
 ext-agent-team:
     pi -e extensions/agent-team.ts -e extensions/theme-cycler.ts
 
+# Orchestrator: delegate-only main agent -> leads -> workers (persistent subagents)
+ext-orchestrator *args:
+    pi -e extensions/coms.ts -e extensions/subagent-widget.ts -e extensions/orchestrator.ts -e extensions/theme-cycler.ts {{args}}
+
 # 11. System select: /system to pick an agent persona as system prompt
 ext-system-select:
     pi -e extensions/system-select.ts -e extensions/minimal.ts -e extensions/theme-cycler.ts
@@ -117,6 +121,13 @@ all:
     just open damage-control minimal theme-cycler
     just open agent-chain theme-cycler
     just open pi-pi theme-cycler
+
+# ------------------------ editor-host (shared border chrome) ------------------------
+
+# Editor host + an example client that adds the git branch to the top-right border.
+# Stack more clients by adding their -e flags; each registers its own segments/keys.
+ext-editor-host *args:
+    pi -e extensions/editor-host.ts -e extensions/example-border-segment.ts {{args}}
 
 # ------------------------ coms + coms-net (HTTP/SSE hub) ------------------------
 

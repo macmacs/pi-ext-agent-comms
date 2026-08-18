@@ -1,593 +1,764 @@
 /**
- * Subagent Widget — /sub, /subclear, /subrm, /subcont commands with stacking live widgets
+ * Subagent Widget — spawn and manage subagents (tmux or headless)
  *
- * Each /sub spawns a background Pi subagent with its own persistent session,
- * enabling conversation continuations via /subcont.
+ * Each subagent is a full Pi instance. In tmux mode it runs as a TUI in a
+ * detached tmux window. In headless mode it runs as `pi --mode rpc` with an
+ * open stdin pipe as a keepalive, no TTY required (k8s / batch pipelines).
+ *
+ * Backend selection (subagent_create):
+ *   PI_SUBAGENT_BACKEND=tmux     — force tmux (requires TMUX env; errors otherwise)
+ *   PI_SUBAGENT_BACKEND=headless — force headless
+ *   (unset)                      — tmux when TMUX present, headless otherwise
+ *
+ * Headless subagents always spawn headless children (TMUX is stripped from
+ * their env and PI_SUBAGENT_BACKEND=headless is propagated).
  *
  * Usage: pi -e extensions/subagent-widget.ts
- * Then:
- *   /sub list files and summarize          — spawn using the parent model/thinking
- *   /sub --model openai/gpt-5 --thinking high review this code
- *   /subcont 1 --thinking xhigh now write tests for it
- *   /subrm 2                               — remove subagent #2 widget
- *   /subclear                              — clear all subagent widgets
  */
 
-import { StringEnum, type ThinkingLevel } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
-import { Container, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
-const { spawn } = require("child_process") as any;
 import * as fs from "fs";
+import * as net from "node:net";
+import * as crypto from "node:crypto";
 import * as os from "os";
 import * as path from "path";
-import { applyExtensionDefaults } from "./lib/themeMap.ts";
+import { pickSubagentName } from "./naming.ts";
 
-const FALLBACK_MODEL = "openrouter/google/gemini-3.5-flash";
-const THINKING_OVERRIDES = ["low", "medium", "high", "xhigh"] as const;
-type ThinkingOverride = (typeof THINKING_OVERRIDES)[number];
+const { execFile, spawn } = require("child_process") as typeof import("child_process");
 
-interface SpawnOptions {
-	model?: string;
-	thinking?: ThinkingOverride;
+// ── Backend selector ──────────────────────────────────────────────────────────
+
+function resolveBackendMode(requestHeadless?: boolean): "tmux" | "headless" {
+  const override = process.env.PI_SUBAGENT_BACKEND;
+  // System-level env override takes highest priority.
+  if (override === "tmux") {
+    if (!process.env.TMUX)
+      throw new Error(
+        "PI_SUBAGENT_BACKEND=tmux requires a tmux session — unset the override or run inside tmux",
+      );
+    return "tmux";
+  }
+  if (override === "headless") return "headless";
+  // Tool-level request.
+  if (requestHeadless) return "headless";
+  // Default: tmux when available, headless otherwise.
+  return process.env.TMUX ? "tmux" : "headless";
 }
+
+// ── Coms socket injection ─────────────────────────────────────────────────────
+
+// Sends the initial task to a freshly-spawned subagent via its coms unix socket.
+// Works for both backends: coms.ts binds the socket *before* writing the registry
+// file, so registry presence guarantees the socket is ready.
+async function sendInitialTaskViaComs(
+  comsName: string,
+  comsProject: string,
+  task: string,
+  parentName: string,
+): Promise<void> {
+  const comsDir =
+    process.env.PI_COMS_DIR || path.join(os.homedir(), ".pi", "coms");
+
+  const subRegistryFile = path.join(
+    comsDir,
+    "projects",
+    comsProject,
+    "agents",
+    `${comsName}.json`,
+  );
+  const subEntry = JSON.parse(fs.readFileSync(subRegistryFile, "utf-8"));
+  const endpoint = subEntry.endpoint as string;
+
+  // Best-effort: use parent's real identity as sender.
+  let senderSession = crypto.randomBytes(8).toString("hex");
+  let senderEndpoint = "";
+  try {
+    const parentRegistryFile = path.join(
+      comsDir,
+      "projects",
+      parentName,
+      "agents",
+      `${parentName}.json`,
+    );
+    const parentEntry = JSON.parse(
+      fs.readFileSync(parentRegistryFile, "utf-8"),
+    );
+    senderSession = parentEntry.session_id;
+    senderEndpoint = parentEntry.endpoint;
+  } catch {
+    /* use generated fallbacks */
+  }
+
+  const envelope = {
+    type: "prompt",
+    msg_id: crypto.randomBytes(10).toString("hex"),
+    sender_session: senderSession,
+    sender_endpoint: senderEndpoint,
+    sender_name: parentName,
+    sender_cwd: process.cwd(),
+    hops: 0,
+    timestamp: new Date().toISOString(),
+    prompt: task,
+    conversation_id: null,
+  };
+
+  await new Promise<void>((resolve, reject) => {
+    const sock = net.createConnection({ path: endpoint });
+    let settled = false;
+    let buf = "";
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      try {
+        sock.destroy();
+      } catch {
+        /* ignore */
+      }
+      reject(err);
+    };
+    const timer = setTimeout(
+      () => fail(new Error("coms inject timeout")),
+      5_000,
+    );
+    sock.once("error", fail);
+    sock.once("connect", () => {
+      try {
+        sock.write(JSON.stringify(envelope) + "\n");
+      } catch (err) {
+        clearTimeout(timer);
+        fail(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
+      sock.on("data", (chunk: Buffer) => {
+        buf += chunk.toString("utf-8");
+        const nl = buf.indexOf("\n");
+        if (nl < 0) return;
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          sock.end();
+        } catch {
+          /* ignore */
+        }
+        try {
+          const resp = JSON.parse(buf.slice(0, nl));
+          if (resp.type === "nack") reject(new Error(resp.error || "nack"));
+          else resolve();
+        } catch {
+          reject(new Error("malformed response from coms socket"));
+        }
+      });
+      sock.once("close", () => {
+        if (!settled) fail(new Error("connection closed before ack"));
+      });
+    });
+  });
+}
+
+// ── Tmux helpers ──────────────────────────────────────────────────────────────
+
+function tmux(...args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("tmux", args, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(stdout.trim());
+    });
+  });
+}
+
+function currentTmuxSession(): Promise<string> {
+  return tmux("display-message", "-p", "#S");
+}
+
+// ── Coms registry polling ─────────────────────────────────────────────────────
+
+// Wait for the subagent's coms registry entry to appear — confirms coms
+// session_start completed and the socket is bound.
+async function waitForComsRegistry(
+  comsName: string,
+  project: string,
+  timeoutMs = 15_000,
+): Promise<boolean> {
+  const comsDir =
+    process.env.PI_COMS_DIR || path.join(os.homedir(), ".pi", "coms");
+  const registryFile = path.join(
+    comsDir,
+    "projects",
+    project,
+    "agents",
+    `${comsName}.json`,
+  );
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    await new Promise<void>((r) => setTimeout(r, 150));
+    if (fs.existsSync(registryFile)) return true;
+  }
+  return false;
+}
+
+function shellQuote(s: string): string {
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+// ── Agent file discovery ──────────────────────────────────────────────────────
+
+interface AgentDef {
+  name: string;
+  description: string;
+  tools?: string;
+  model?: string;
+  filePath: string;
+}
+
+function parseFrontmatter(content: string): Record<string, string> {
+  const match = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!match) return {};
+  const result: Record<string, string> = {};
+  for (const line of match[1].split("\n")) {
+    const colonIdx = line.indexOf(":");
+    if (colonIdx < 0) continue;
+    const key = line.slice(0, colonIdx).trim();
+    const val = line.slice(colonIdx + 1).trim();
+    if (key && val) result[key] = val;
+  }
+  return result;
+}
+
+function scanAgentDir(dir: string): AgentDef[] {
+  try {
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith(".md"))
+      .map((f) => {
+        const filePath = path.join(dir, f);
+        const content = fs.readFileSync(filePath, "utf8");
+        const fm = parseFrontmatter(content);
+        return {
+          name: fm.name ?? f.slice(0, -3),
+          description: fm.description ?? "",
+          tools: fm.tools,
+          model: fm.model,
+          filePath,
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
+function buildAgentsTable(defs: AgentDef[]): string {
+  if (defs.length === 0) return "";
+  let out =
+    `## Available Specialist Agents\n\n` +
+    `You have permission to spawn any of these autonomously — no need to ask first. ` +
+    `Spawned subagents are persistent: their context window stays intact between messages, so you can ` +
+    `send follow-up questions or additional tasks to the same agent via coms_send rather than spawning a new one. ` +
+    `Prefer delegation when a task is self-contained, would consume significant context, ` +
+    `or fits a specialist's profile — and treat spawned agents as long-lived collaborators rather than single-use workers.` +
+    ` Use \`subagent_create(task: "...", agent: "<name>")\` to spawn and \`coms_send\` to continue the conversation.\n\n`;
+  for (const d of defs)
+    out += `- **${d.name}**: ${d.description}${d.model ? ` _(model: ${d.model})_` : ""}\n`;
+  return out;
+}
+
+function findProjectAgentDir(): string | undefined {
+  let dir = process.cwd();
+  while (true) {
+    const candidate = path.join(dir, ".pi", "agents");
+    if (fs.existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+function resolveAgentFile(name: string): string | undefined {
+  const projectDir = findProjectAgentDir();
+  if (projectDir) {
+    const local = path.join(projectDir, `${name}.md`);
+    if (fs.existsSync(local)) return local;
+  }
+  const global_ = path.join(
+    os.homedir(),
+    ".pi",
+    "agent",
+    "agents",
+    `${name}.md`,
+  );
+  if (fs.existsSync(global_)) return global_;
+  return undefined;
+}
+
+// ── State ─────────────────────────────────────────────────────────────────────
 
 interface SubState {
-	id: number;
-	status: "running" | "done" | "error";
-	task: string;
-	textChunks: string[];
-	toolCount: number;
-	elapsed: number;
-	sessionFile: string;   // persistent JSONL session path — used by /subcont to resume
-	turnCount: number;     // increments each time /subcont continues this agent
-	model: string;
-	thinking: ThinkingLevel;
-	proc?: any;            // active ChildProcess ref (for kill on /subrm)
+  id: number;
+  task: string;
+  comsName: string;
+  sessionFile: string;
+  startedAt: number;
+  mode: "tmux" | "headless";
+  // tmux only
+  tmuxSession?: string;
+  tmuxWindow?: string;
+  // headless only
+  pid?: number;
+  logPath?: string;
 }
 
-interface ParsedCommand {
-	options: SpawnOptions;
-	rest: string;
-	error?: string;
-}
-
-function readCommandValue(input: string): { value?: string; rest: string } {
-	const trimmed = input.trimStart();
-	if (!trimmed) return { rest: "" };
-
-	const quote = trimmed[0];
-	if (quote === '"' || quote === "'") {
-		const end = trimmed.indexOf(quote, 1);
-		if (end === -1) return { rest: trimmed };
-		return { value: trimmed.slice(1, end), rest: trimmed.slice(end + 1) };
-	}
-
-	const end = trimmed.search(/\s/);
-	return end === -1
-		? { value: trimmed, rest: "" }
-		: { value: trimmed.slice(0, end), rest: trimmed.slice(end) };
-}
-
-function parseCommandOptions(input: string): ParsedCommand {
-	const options: SpawnOptions = {};
-	let rest = input.trimStart();
-
-	while (rest.startsWith("--")) {
-		const flagMatch = rest.match(/^--(model|thinking)(?:=([^\s]+))?(?:\s+|$)/);
-		if (!flagMatch) {
-			const flag = rest.match(/^\S+/)?.[0] || rest;
-			return { options, rest: "", error: `Unknown or malformed option: ${flag}` };
-		}
-
-		const flag = flagMatch[1];
-		let value = flagMatch[2];
-		rest = rest.slice(flagMatch[0].length);
-		if (!value) {
-			const parsed = readCommandValue(rest);
-			value = parsed.value;
-			rest = parsed.rest;
-		}
-		if (!value) return { options, rest: "", error: `Missing value for --${flag}` };
-
-		if (flag === "model") {
-			options.model = value;
-			rest = rest.trimStart();
-			continue;
-		}
-
-		const thinking = value.toLowerCase();
-		if (!THINKING_OVERRIDES.includes(thinking as ThinkingOverride)) {
-			return {
-				options,
-				rest: "",
-				error: "Thinking must be one of: low, medium, high, xhigh",
-			};
-		}
-		options.thinking = thinking as ThinkingOverride;
-		rest = rest.trimStart();
-	}
-
-	return { options, rest: rest.trim() };
-}
+// ── Extension ─────────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-	const agents: Map<number, SubState> = new Map();
-	let nextId = 1;
-	let widgetCtx: any;
-
-	// ── Session file helpers ──────────────────────────────────────────────────
-
-	function makeSessionFile(id: number): string {
-		const dir = path.join(os.homedir(), ".pi", "agent", "sessions", "subagents");
-		fs.mkdirSync(dir, { recursive: true });
-		return path.join(dir, `subagent-${id}-${Date.now()}.jsonl`);
-	}
-
-	// ── Widget rendering ──────────────────────────────────────────────────────
-
-	function updateWidgets() {
-		if (!widgetCtx) return;
-
-		for (const [id, state] of Array.from(agents.entries())) {
-			const key = `sub-${id}`;
-			widgetCtx.ui.setWidget(key, (_tui: any, theme: any) => {
-				const container = new Container();
-				const borderFn = (s: string) => theme.fg("dim", s);
-
-				container.addChild(new Text("", 0, 0)); // top margin
-				container.addChild(new DynamicBorder(borderFn));
-				const content = new Text("", 1, 0);
-				container.addChild(content);
-				container.addChild(new DynamicBorder(borderFn));
-
-				return {
-					render(width: number): string[] {
-						const lines: string[] = [];
-						const statusColor = state.status === "running" ? "accent"
-							: state.status === "done" ? "success" : "error";
-						const statusIcon = state.status === "running" ? "●"
-							: state.status === "done" ? "✓" : "✗";
-
-						const taskPreview = state.task.length > 40
-							? state.task.slice(0, 37) + "..."
-							: state.task;
-
-						const turnLabel = state.turnCount > 1
-							? theme.fg("dim", ` · Turn ${state.turnCount}`)
-							: "";
-
-						lines.push(
-							theme.fg(statusColor, `${statusIcon} Subagent #${state.id}`) +
-							turnLabel +
-							theme.fg("dim", `  ${taskPreview}`) +
-							theme.fg("dim", `  (${Math.round(state.elapsed / 1000)}s)`) +
-							theme.fg("dim", ` | Tools: ${state.toolCount}`)
-						);
-
-						const fullText = state.textChunks.join("");
-						const lastLine = fullText.split("\n").filter((l: string) => l.trim()).pop() || "";
-						if (lastLine) {
-							const trimmed = lastLine.length > width - 10
-								? lastLine.slice(0, width - 13) + "..."
-								: lastLine;
-							lines.push(theme.fg("muted", `  ${trimmed}`));
-						}
-
-						content.setText(lines.join("\n"));
-						return container.render(width);
-					},
-					invalidate() {
-						container.invalidate();
-					},
-				};
-			});
-		}
-	}
-
-	// ── Streaming helpers ─────────────────────────────────────────────────────
-
-	function processLine(state: SubState, line: string) {
-		if (!line.trim()) return;
-		try {
-			const event = JSON.parse(line);
-			const type = event.type;
-
-			if (type === "message_update") {
-				const delta = event.assistantMessageEvent;
-				if (delta?.type === "text_delta") {
-					state.textChunks.push(delta.delta || "");
-					updateWidgets();
-				}
-			} else if (type === "tool_execution_start") {
-				state.toolCount++;
-				updateWidgets();
-			}
-		} catch {}
-	}
-
-	function spawnAgent(
-		state: SubState,
-		prompt: string,
-		ctx: any,
-		options: SpawnOptions = {},
-	): Promise<void> {
-		const parentProvider = ctx.model?.provider?.trim();
-		const parentModelId = ctx.model?.id?.trim();
-		const hasParentModel = parentProvider && parentModelId
-			&& parentProvider !== "unknown" && parentModelId !== "unknown";
-		const parentModel = hasParentModel
-			? `${parentProvider}/${parentModelId}`
-			: FALLBACK_MODEL;
-		const model = options.model?.trim() || parentModel;
-		const thinking = options.thinking || pi.getThinkingLevel();
-		state.model = model;
-		state.thinking = thinking;
-
-		return new Promise<void>((resolve) => {
-			const proc = spawn("pi", [
-				"--mode", "json",
-				"-p",
-				"--session", state.sessionFile,   // persistent session for /subcont resumption
-				"--no-extensions",
-				"--model", model,
-				"--tools", "read,bash,grep,find,ls",
-				"--thinking", thinking,
-				prompt,
-			], {
-				stdio: ["ignore", "pipe", "pipe"],
-				env: { ...process.env },
-			});
-
-			state.proc = proc;
-
-			const startTime = Date.now();
-			const timer = setInterval(() => {
-				state.elapsed = Date.now() - startTime;
-				updateWidgets();
-			}, 1000);
-
-			let buffer = "";
-
-			proc.stdout!.setEncoding("utf-8");
-			proc.stdout!.on("data", (chunk: string) => {
-				buffer += chunk;
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-				for (const line of lines) processLine(state, line);
-			});
-
-			proc.stderr!.setEncoding("utf-8");
-			proc.stderr!.on("data", (chunk: string) => {
-				if (chunk.trim()) {
-					state.textChunks.push(chunk);
-					updateWidgets();
-				}
-			});
-
-			proc.on("close", (code) => {
-				if (buffer.trim()) processLine(state, buffer);
-				clearInterval(timer);
-				state.elapsed = Date.now() - startTime;
-				state.status = code === 0 ? "done" : "error";
-				state.proc = undefined;
-				updateWidgets();
-
-				const result = state.textChunks.join("");
-				ctx.ui.notify(
-					`Subagent #${state.id} ${state.status} in ${Math.round(state.elapsed / 1000)}s`,
-					state.status === "done" ? "success" : "error"
-				);
-
-				pi.sendMessage({
-					customType: "subagent-result",
-					content: `Subagent #${state.id}${state.turnCount > 1 ? ` (Turn ${state.turnCount})` : ""} finished "${prompt}" in ${Math.round(state.elapsed / 1000)}s.\n\nResult:\n${result.slice(0, 8000)}${result.length > 8000 ? "\n\n... [truncated]" : ""}`,
-					display: true,
-				}, { deliverAs: "followUp", triggerTurn: true });
-
-				resolve();
-			});
-
-			proc.on("error", (err) => {
-				clearInterval(timer);
-				state.status = "error";
-				state.proc = undefined;
-				state.textChunks.push(`Error: ${err.message}`);
-				updateWidgets();
-				resolve();
-			});
-		});
-	}
-
-	// ── Tools for the Main Agent ──────────────────────────────────────────────
-
-	pi.registerTool({
-		name: "subagent_create",
-		description: "Spawn a background subagent. Thinking level is required and is the primary way to match the subagent to task complexity: low for lightweight/simple tasks, medium for routine tasks needing moderate reasoning, high for complex multi-step work, and xhigh for the hardest tasks or when accuracy and performance are critical. Unless the user explicitly requests a specific model, omit model and use the default inherited parent model. Returns immediately and delivers results as a follow-up message.",
-		parameters: Type.Object({
-			task: Type.String({ description: "The complete task description for the subagent to perform" }),
-			model: Type.Optional(Type.String({
-				description: "Leave blank or omit unless the user explicitly requests a specific model. Do not choose a different model autonomously. When explicitly requested, provide the override in provider/model form. The default reuses the parent caller's current model and falls back to openrouter/google/gemini-3.5-flash only if the parent has no model.",
-			})),
-			thinking: StringEnum([...THINKING_OVERRIDES], {
-				description: "Required thinking level. Use low for lightweight/simple tasks; medium for routine tasks needing moderate reasoning; high for complex, multi-step, or ambiguous work; and xhigh for the hardest tasks or when accuracy and performance are critical. Pi may clamp the value to the selected model's supported maximum.",
-			}),
-		}),
-		execute: async (callId, args, _signal, _onUpdate, ctx) => {
-			widgetCtx = ctx;
-			const id = nextId++;
-			const state: SubState = {
-				id,
-				status: "running",
-				task: args.task,
-				textChunks: [],
-				toolCount: 0,
-				elapsed: 0,
-				sessionFile: makeSessionFile(id),
-				turnCount: 1,
-				model: "",
-				thinking: pi.getThinkingLevel(),
-			};
-			agents.set(id, state);
-			updateWidgets();
-
-			// Fire-and-forget
-			spawnAgent(state, args.task, ctx, { model: args.model, thinking: args.thinking });
-
-			return {
-				content: [{ type: "text", text: `Subagent #${id} spawned with ${state.model} (${state.thinking} thinking) and is running in background.` }],
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "subagent_continue",
-		description: "Continue an existing subagent conversation. Thinking level is required and is the primary way to match this turn to task complexity: low for lightweight/simple tasks, medium for routine tasks needing moderate reasoning, high for complex multi-step work, and xhigh for the hardest tasks or when accuracy and performance are critical. Unless the user explicitly requests a specific model, omit model and use the default inherited parent model. Returns immediately while it runs in the background.",
-		parameters: Type.Object({
-			id: Type.Number({ description: "The ID of the subagent to continue" }),
-			prompt: Type.String({ description: "The follow-up prompt or new instructions" }),
-			model: Type.Optional(Type.String({
-				description: "Leave blank or omit unless the user explicitly requests a specific model. Do not choose a different model autonomously. When explicitly requested, provide the override in provider/model form for this turn. The default reuses the parent caller's current model.",
-			})),
-			thinking: StringEnum([...THINKING_OVERRIDES], {
-				description: "Required thinking level for this turn. Use low for lightweight/simple tasks; medium for routine tasks needing moderate reasoning; high for complex, multi-step, or ambiguous work; and xhigh for the hardest tasks or when accuracy and performance are critical. Pi may clamp the value to the selected model's supported maximum.",
-			}),
-		}),
-		execute: async (callId, args, _signal, _onUpdate, ctx) => {
-			widgetCtx = ctx;
-			const state = agents.get(args.id);
-			if (!state) {
-				return { content: [{ type: "text", text: `Error: No subagent #${args.id} found.` }] };
-			}
-			if (state.status === "running") {
-				return { content: [{ type: "text", text: `Error: Subagent #${args.id} is still running.` }] };
-			}
-
-			state.status = "running";
-			state.task = args.prompt;
-			state.textChunks = [];
-			state.elapsed = 0;
-			state.turnCount++;
-			updateWidgets();
-
-			ctx.ui.notify(`Continuing Subagent #${args.id} (Turn ${state.turnCount})…`, "info");
-			spawnAgent(state, args.prompt, ctx, { model: args.model, thinking: args.thinking });
-
-			return {
-				content: [{ type: "text", text: `Subagent #${args.id} continuing with ${state.model} (${state.thinking} thinking) in background.` }],
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "subagent_remove",
-		description: "Remove a specific subagent. Kills it if it's currently running.",
-		parameters: Type.Object({
-			id: Type.Number({ description: "The ID of the subagent to remove" }),
-		}),
-		execute: async (callId, args, _signal, _onUpdate, ctx) => {
-			widgetCtx = ctx;
-			const state = agents.get(args.id);
-			if (!state) {
-				return { content: [{ type: "text", text: `Error: No subagent #${args.id} found.` }] };
-			}
-
-			if (state.proc && state.status === "running") {
-				state.proc.kill("SIGTERM");
-			}
-			ctx.ui.setWidget(`sub-${args.id}`, undefined);
-			agents.delete(args.id);
-
-			return {
-				content: [{ type: "text", text: `Subagent #${args.id} removed successfully.` }],
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "subagent_list",
-		description: "List all active and finished subagents, showing their IDs, tasks, and status.",
-		parameters: Type.Object({}),
-		execute: async () => {
-			if (agents.size === 0) {
-				return { content: [{ type: "text", text: "No active subagents." }] };
-			}
-
-			const list = Array.from(agents.values()).map(s =>
-				`#${s.id} [${s.status.toUpperCase()}] (Turn ${s.turnCount}, ${s.model}, ${s.thinking}) - ${s.task}`
-			).join("\n");
-
-			return {
-				content: [{ type: "text", text: `Subagents:\n${list}` }],
-			};
-		},
-	});
-	// ── /sub [--model <model>] [--thinking <level>] <task> ────────────────────
-
-	pi.registerCommand("sub", {
-		description: "Spawn a subagent: /sub [--model provider/model] [--thinking low|medium|high|xhigh] <task>",
-		handler: async (args, ctx) => {
-			widgetCtx = ctx;
-
-			const parsed = parseCommandOptions(args || "");
-			if (parsed.error) {
-				ctx.ui.notify(parsed.error, "error");
-				return;
-			}
-			const task = parsed.rest;
-			if (!task) {
-				ctx.ui.notify("Usage: /sub [--model provider/model] [--thinking low|medium|high|xhigh] <task>", "error");
-				return;
-			}
-
-			const id = nextId++;
-			const state: SubState = {
-				id,
-				status: "running",
-				task,
-				textChunks: [],
-				toolCount: 0,
-				elapsed: 0,
-				sessionFile: makeSessionFile(id),
-				turnCount: 1,
-				model: "",
-				thinking: pi.getThinkingLevel(),
-			};
-			agents.set(id, state);
-			updateWidgets();
-
-			// Fire-and-forget
-			spawnAgent(state, task, ctx, parsed.options);
-			ctx.ui.notify(`Subagent #${id}: ${state.model} (${state.thinking} thinking)`, "info");
-		},
-	});
-
-	// ── /subcont <id> [--model <model>] [--thinking <level>] <prompt> ─────────
-
-	pi.registerCommand("subcont", {
-		description: "Continue a subagent: /subcont <id> [--model provider/model] [--thinking low|medium|high|xhigh] <prompt>",
-		handler: async (args, ctx) => {
-			widgetCtx = ctx;
-
-			const trimmed = args?.trim() ?? "";
-			const idMatch = trimmed.match(/^(\d+)(?:\s+|$)/);
-			if (!idMatch) {
-				ctx.ui.notify("Usage: /subcont <id> [--model provider/model] [--thinking low|medium|high|xhigh] <prompt>", "error");
-				return;
-			}
-
-			const num = parseInt(idMatch[1], 10);
-			const parsed = parseCommandOptions(trimmed.slice(idMatch[0].length));
-			if (parsed.error) {
-				ctx.ui.notify(parsed.error, "error");
-				return;
-			}
-			const prompt = parsed.rest;
-
-			if (!prompt) {
-				ctx.ui.notify("Usage: /subcont <id> [--model provider/model] [--thinking low|medium|high|xhigh] <prompt>", "error");
-				return;
-			}
-
-			const state = agents.get(num);
-			if (!state) {
-				ctx.ui.notify(`No subagent #${num} found. Use /sub to create one.`, "error");
-				return;
-			}
-
-			if (state.status === "running") {
-				ctx.ui.notify(`Subagent #${num} is still running — wait for it to finish first.`, "warning");
-				return;
-			}
-
-			// Resume: update state for a new turn
-			state.status = "running";
-			state.task = prompt;
-			state.textChunks = [];
-			state.elapsed = 0;
-			state.turnCount++;
-			updateWidgets();
-
-			ctx.ui.notify(`Continuing Subagent #${num} (Turn ${state.turnCount})…`, "info");
-
-			// Fire-and-forget — reuses the same sessionFile for conversation history
-			spawnAgent(state, prompt, ctx, parsed.options);
-			ctx.ui.notify(`Subagent #${num}: ${state.model} (${state.thinking} thinking)`, "info");
-		},
-	});
-
-	// ── /subrm <number> ───────────────────────────────────────────────────────
-
-	pi.registerCommand("subrm", {
-		description: "Remove a specific subagent widget: /subrm <number>",
-		handler: async (args, ctx) => {
-			widgetCtx = ctx;
-
-			const num = parseInt(args?.trim() ?? "", 10);
-			if (isNaN(num)) {
-				ctx.ui.notify("Usage: /subrm <number>", "error");
-				return;
-			}
-
-			const state = agents.get(num);
-			if (!state) {
-				ctx.ui.notify(`No subagent #${num} found.`, "error");
-				return;
-			}
-
-			// Kill the process if still running
-			if (state.proc && state.status === "running") {
-				state.proc.kill("SIGTERM");
-				ctx.ui.notify(`Subagent #${num} killed and removed.`, "warning");
-			} else {
-				ctx.ui.notify(`Subagent #${num} removed.`, "info");
-			}
-
-			ctx.ui.setWidget(`sub-${num}`, undefined);
-			agents.delete(num);
-		},
-	});
-
-	// ── /subclear ─────────────────────────────────────────────────────────────
-
-	pi.registerCommand("subclear", {
-		description: "Clear all subagent widgets",
-		handler: async (_args, ctx) => {
-			widgetCtx = ctx;
-
-			let killed = 0;
-			for (const [id, state] of Array.from(agents.entries())) {
-				if (state.proc && state.status === "running") {
-					state.proc.kill("SIGTERM");
-					killed++;
-				}
-				ctx.ui.setWidget(`sub-${id}`, undefined);
-			}
-
-			const total = agents.size;
-			agents.clear();
-			nextId = 1;
-
-			const msg = total === 0
-				? "No subagents to clear."
-				: `Cleared ${total} subagent${total !== 1 ? "s" : ""}${killed > 0 ? ` (${killed} killed)` : ""}.`;
-			ctx.ui.notify(msg, total === 0 ? "info" : "success");
-		},
-	});
-
-	// ── Session lifecycle ─────────────────────────────────────────────────────
-
-	pi.on("session_start", async (_event, ctx) => {
-		applyExtensionDefaults(import.meta.url, ctx);
-		for (const [id, state] of Array.from(agents.entries())) {
-			if (state.proc && state.status === "running") {
-				state.proc.kill("SIGTERM");
-			}
-			ctx.ui.setWidget(`sub-${id}`, undefined);
-		}
-		agents.clear();
-		nextId = 1;
-		widgetCtx = ctx;
-	});
+  const agents: Map<number, SubState> = new Map();
+  let nextId = 1;
+  let agentDefs: AgentDef[] = [];
+  let agentsTable = "";
+  let scopedModelsNote = "";
+
+  function makeSessionFile(id: number): string {
+    const dir = path.join(
+      os.homedir(),
+      ".pi",
+      "agent",
+      "sessions",
+      "subagents",
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    return path.join(dir, `subagent-${id}-${Date.now()}.jsonl`);
+  }
+
+  function makeLogFile(id: number): string {
+    const dir = path.join(
+      os.homedir(),
+      ".pi",
+      "agent",
+      "sessions",
+      "subagents",
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    return path.join(dir, `subagent-${id}-${Date.now()}.log`);
+  }
+
+  // ── Liveness ───────────────────────────────────────────────────────────────
+
+  async function isAlive(state: SubState): Promise<boolean> {
+    if (state.mode === "headless") {
+      if (!state.pid) return false;
+      try {
+        process.kill(state.pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    // tmux path
+    try {
+      const windows = await tmux(
+        "list-windows",
+        "-t",
+        state.tmuxSession!,
+        "-F",
+        "#{window_name}",
+      );
+      return windows.split("\n").includes(state.tmuxWindow!);
+    } catch {
+      return false;
+    }
+  }
+
+  // ── Cascade kill headless children ─────────────────────────────────────────
+
+  function killHeadlessChildren(): void {
+    for (const state of agents.values()) {
+      if (state.mode === "headless" && state.pid) {
+        try {
+          process.kill(-state.pid, "SIGTERM");
+        } catch {
+          /* already dead */
+        }
+      }
+    }
+  }
+
+  // Register on process exit so cascade fires even on abrupt termination.
+  // POSIX only — process.kill(-pid) is not supported on Windows.
+  if (process.platform !== "win32") {
+    process.on("exit", killHeadlessChildren);
+  }
+
+  // ── Spawn ──────────────────────────────────────────────────────────────────
+
+  async function spawnSubagent(
+    task: string,
+    purposeOverride: string | undefined,
+    agentName: string | undefined,
+    modelOverride: string | undefined,
+    mode: "tmux" | "headless",
+    ctx: any,
+  ): Promise<SubState> {
+    const id = nextId++;
+    const sessionFile = makeSessionFile(id);
+    const parentName = process.env.PI_COMS_NAME ?? "agent";
+
+    // Collision-safe subagent name from parent's coms pool.
+    const comsDir =
+      process.env.PI_COMS_DIR || path.join(os.homedir(), ".pi", "coms");
+    const poolDir = path.join(comsDir, "projects", parentName, "agents");
+    const existingNames = new Set<string>();
+    try {
+      for (const f of fs.readdirSync(poolDir)) {
+        if (f.endsWith(".json")) existingNames.add(f.slice(0, -5));
+      }
+    } catch {
+      /* pool dir may not exist yet */
+    }
+    const comsName = pickSubagentName(parentName, existingNames);
+    const comsProject = parentName;
+
+    // Model: explicit > agent profile frontmatter > parent model.
+    let profileModel: string | undefined;
+    if (agentName) {
+      const pf = resolveAgentFile(agentName);
+      if (pf) profileModel = parseFrontmatter(fs.readFileSync(pf, "utf8")).model;
+    }
+    const model =
+      modelOverride ??
+      profileModel ??
+      (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined);
+
+    const extDir = path.dirname(new URL(import.meta.url).pathname);
+    const comsExt = path.join(extDir, "coms.ts");
+    const widgetExt = path.join(extDir, "subagent-widget.ts");
+
+    const purpose = (purposeOverride ?? task)
+      .slice(0, 80)
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const taskWithReporting =
+      task +
+      `\n\nIMPORTANT: When you have completed this task, you MUST send your result back to the parent agent using the coms_send tool with target="${parentName}". Do not skip this — it is required even for simple or short tasks. Do not just reply in chat.`;
+
+    if (mode === "headless") {
+      // ── Headless: spawn pi --mode rpc with open stdin pipe ──────────────────
+      const logPath = makeLogFile(id);
+
+      const piArgs = [
+        "-e", comsExt,
+        "-e", widgetExt,
+        "--mode", "rpc",
+        "--cname", comsName,
+        "--project", comsProject,
+        "--session", sessionFile,
+        "--purpose", purpose,
+        ...(model ? ["--model", model] : []),
+      ];
+
+      // Strip TMUX from env and lock children to headless so the constraint
+      // propagates down the tree without any per-level special casing.
+      const childEnv: Record<string, string> = {
+        ...(process.env as Record<string, string>),
+      };
+      delete childEnv.TMUX;
+      delete childEnv.TMUX_PANE;
+      childEnv.PI_SUBAGENT_BACKEND = "headless";
+      childEnv.PI_PARENT_SESSION = parentName;
+      childEnv.PI_COMS_PROJECT = comsProject;
+      if (agentName) childEnv.PI_AGENT_PROFILE = agentName;
+
+      const logFd = fs.openSync(logPath, "w");
+      const child = spawn("pi", piArgs, {
+        detached: true,
+        stdio: ["pipe", logFd, logFd],
+        env: childEnv,
+      });
+      fs.closeSync(logFd); // close our copy; child holds its own fd
+      child.unref();
+
+      const ready = await waitForComsRegistry(comsName, comsProject);
+      if (!ready) {
+        if (process.platform !== "win32" && child.pid) {
+          try {
+            process.kill(-child.pid, "SIGTERM");
+          } catch {
+            /* ignore */
+          }
+        }
+        throw new Error(
+          `subagent ${comsName} did not initialise within timeout — log: ${logPath}`,
+        );
+      }
+
+      await sendInitialTaskViaComs(comsName, comsProject, taskWithReporting, parentName);
+
+      const state: SubState = {
+        id,
+        task,
+        comsName,
+        sessionFile,
+        startedAt: Date.now(),
+        mode: "headless",
+        pid: child.pid,
+        logPath,
+      };
+      agents.set(id, state);
+      return state;
+    } else {
+      // ── Tmux: spawn pi TUI in a detached tmux window ─────────────────────
+      const piCmd = [
+        "pi",
+        "-e", shellQuote(comsExt),
+        "-e", shellQuote(widgetExt),
+        "--cname", shellQuote(comsName),
+        "--project", shellQuote(comsProject),
+        "--session", shellQuote(sessionFile),
+        "--purpose", shellQuote(purpose),
+        ...(model ? ["--model", shellQuote(model)] : []),
+      ].join(" ");
+
+      const parentSession = await currentTmuxSession();
+      const subsSession = `${process.env.PI_COMS_NAME ?? parentSession}-subs`;
+      const tmuxWindow = comsName;
+      const envArgs = [
+        "-e", `PI_PARENT_SESSION=${parentSession}`,
+        "-e", `PI_COMS_PROJECT=${comsProject}`,
+        ...(agentName ? ["-e", `PI_AGENT_PROFILE=${agentName}`] : []),
+      ];
+
+      try {
+        await tmux(
+          "new-session", "-d", "-s", subsSession, "-n", tmuxWindow,
+          ...envArgs, piCmd,
+        );
+      } catch {
+        await tmux(
+          "new-window", "-t", subsSession, "-n", tmuxWindow,
+          ...envArgs, piCmd,
+        );
+      }
+
+      const ready = await waitForComsRegistry(comsName, comsProject);
+      if (!ready)
+        throw new Error(
+          `subagent ${comsName} did not initialise within timeout`,
+        );
+
+      await sendInitialTaskViaComs(comsName, comsProject, taskWithReporting, parentName);
+
+      const state: SubState = {
+        id,
+        task,
+        comsName,
+        sessionFile,
+        startedAt: Date.now(),
+        mode: "tmux",
+        tmuxSession: subsSession,
+        tmuxWindow,
+      };
+      agents.set(id, state);
+      return state;
+    }
+  }
+
+  // ── LLM tools ──────────────────────────────────────────────────────────────
+
+  pi.registerTool({
+    name: "subagent_create",
+    description:
+      "Spawn a background subagent running a full Pi instance. In tmux environments the subagent runs as an interactive TUI; otherwise it runs headlessly. The subagent is automatically instructed to report results back to you via coms_send — do not repeat this in the task. Write the task as a natural prompt; it is delivered as the subagent's first user message. Returns the subagent ID and tmux session name. Backend mode is determined by the environment — do not try to control it.",
+    parameters: Type.Object({
+      task: Type.String({
+        description: "The complete task description for the subagent to perform",
+      }),
+      purpose: Type.Optional(
+        Type.String({
+          description:
+            "Short label (≤80 chars) shown in the coms pool widget. Defaults to the first 80 chars of task.",
+        }),
+      ),
+      agent: Type.Optional(
+        Type.String({
+          description:
+            "Name of a specialist agent profile to apply (stem of a .md file in .pi/agents/ or ~/.pi/agent/agents/). The file's full contents are appended to the subagent's system prompt.",
+        }),
+      ),
+      model: Type.Optional(
+        Type.String({
+          description:
+            "Model to run the subagent on, as 'provider/id' (e.g. 'openrouter/google/gemini-3-flash-preview'). Overrides the agent profile's model and the parent's model. Use this to run cheaper workers on cheaper models.",
+        }),
+      ),
+    }),
+    execute: async (_callId, args, _signal, _onUpdate, ctx) => {
+      let backendMode: "tmux" | "headless";
+      try {
+        backendMode = resolveBackendMode();
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: err instanceof Error ? err.message : String(err),
+            },
+          ],
+        };
+      }
+
+      if (args.agent && !resolveAgentFile(args.agent)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Agent profile "${args.agent}" not found in .pi/agents/ or ~/.pi/agent/agents/.`,
+            },
+          ],
+        };
+      }
+
+      let state: SubState;
+      try {
+        state = await spawnSubagent(
+          args.task,
+          args.purpose,
+          args.agent,
+          args.model,
+          backendMode,
+          ctx,
+        );
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to spawn subagent: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+        };
+      }
+
+      const detail =
+        state.mode === "tmux"
+          ? `tmux: "${state.tmuxSession}"`
+          : `headless pid=${state.pid} · log: "${state.logPath}"`;
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Subagent #${state.id} spawned  ·  ${detail}  ·  coms: "${state.comsName}"  ·  use coms_send target="${state.comsName}" to send it messages  ·  it will report back to you at "${process.env.PI_COMS_NAME}" when done. Do not sleep, poll, or wait for its reply — you'll be automatically resumed when it responds. Continue with other work or end your turn.`,
+          },
+        ],
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "subagent_list",
+    description: "List all active subagents with their IDs and session names.",
+    parameters: Type.Object({}),
+    execute: async () => {
+      const alive: string[] = [];
+      for (const s of agents.values()) {
+        if (await isAlive(s)) {
+          const detail =
+            s.mode === "tmux"
+              ? `tmux=${s.tmuxSession}`
+              : `pid=${s.pid}`;
+          alive.push(
+            `#${s.id}  [${s.mode}]  coms=${s.comsName}  ${detail}  "${s.task}"`,
+          );
+        } else {
+          agents.delete(s.id);
+        }
+      }
+      if (alive.length === 0) {
+        return { content: [{ type: "text", text: "No active subagents." }] };
+      }
+      return { content: [{ type: "text", text: alive.join("\n") }] };
+    },
+  });
+
+  // ── Session lifecycle ──────────────────────────────────────────────────────
+
+  pi.on("session_start", async (_event, _ctx) => {
+    agents.clear();
+    nextId = 1;
+
+    // Scan agent profile dirs — project-local first, then global.
+    // Deduplicate by name: project-local files shadow global ones.
+    const localDefs = scanAgentDir(findProjectAgentDir() ?? "");
+    const globalDefs = scanAgentDir(
+      path.join(os.homedir(), ".pi", "agent", "agents"),
+    );
+    const seen = new Set(localDefs.map((d) => d.name));
+    agentDefs = [...localDefs, ...globalDefs.filter((d) => !seen.has(d.name))];
+    agentsTable = buildAgentsTable(agentDefs);
+
+    // Read scoped/enabled models from settings.json for subagent spawning guidance.
+    try {
+      const settingsPath = path.join(
+        os.homedir(),
+        ".pi",
+        "agent",
+        "settings.json",
+      );
+      const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+      const enabledModels: string[] = settings.enabledModels ?? [];
+      if (enabledModels.length > 0) {
+        const list = enabledModels.map((m: string) => `- ${m}`).join("\n");
+        scopedModelsNote = `\n\n## Available Models for Subagents\nWhen spawning subagents and no agent profile specifies a model, choose only from this list:\n${list}`;
+      }
+    } catch {
+      /* settings.json missing or malformed */
+    }
+
+    const ownComsName = process.env.PI_COMS_NAME;
+    const isSubagent = !!process.env.PI_PARENT_SESSION;
+    const projectArgIdx = process.argv.indexOf("--project");
+    const projectArgVal =
+      projectArgIdx >= 0 ? process.argv[projectArgIdx + 1] : undefined;
+    const parentComsName =
+      isSubagent && projectArgVal && projectArgVal !== "default"
+        ? projectArgVal
+        : undefined;
+
+    const agentProfileName = process.env.PI_AGENT_PROFILE;
+    let agentProfileBody: string | undefined;
+    if (agentProfileName) {
+      const profilePath = resolveAgentFile(agentProfileName);
+      if (profilePath) {
+        const raw = fs.readFileSync(profilePath, "utf8");
+        agentProfileBody = raw.replace(/^---[\s\S]*?\n---\n?/, "").trimStart();
+      }
+    }
+
+    pi.on("before_agent_start", async (event) => {
+      let sp = event.systemPrompt;
+      if (ownComsName) {
+        sp += `\n\nYour coms name is "${ownComsName}".`;
+      }
+      if (isSubagent) {
+        sp += ` You are a subagent. When you have completed your task, you MUST send your result back to your parent agent using the coms_send tool with target="${parentComsName}". Do not finish without doing this.`;
+      }
+      if (!isSubagent) {
+        sp += `\n\n## Directory Exploration & Recon\n\nWhen you are asked to explore, scan, or map out directories, search across the codebase, or do any broad recon (finding files, grepping, understanding structure), prefer spawning a subagent to do it rather than exploring directly. Work from the subagent's reported findings. This keeps large directory listings and file contents out of your own context window. If a suitable specialist agent (such as a scout/recon profile) is listed below, delegate to it.`;
+      }
+      if (agentProfileBody) {
+        sp += `\n\n## Agent Profile: ${agentProfileName}\n\n${agentProfileBody}`;
+      }
+      if (agentsTable) {
+        sp += `\n\n${agentsTable}`;
+      }
+      if (scopedModelsNote) {
+        sp += scopedModelsNote;
+      }
+      return { systemPrompt: sp };
+    });
+  });
+
+  pi.on("session_shutdown", async () => {
+    killHeadlessChildren();
+  });
 }

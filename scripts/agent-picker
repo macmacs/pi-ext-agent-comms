@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# agent-picker — fzf popup to view and navigate to all running agents across tmux sessions
+#
+# Usage: run directly or bind in tmux:
+#   bind a display-popup -E -w 82% -h 65% "agent-picker"
+#
+# Coms names come from ~/.pi/coms registry files (tmux_pane field).
+# Agent state comes from per-pane @agent_state user option (set via agent hooks).
+
+COMS_DIR="${PI_COMS_DIR:-$HOME/.pi/coms}"
+
+# ANSI colours tuned to oh-my-tmux palette
+C_RUNNING='\033[38;5;150m'  # soft green
+C_CTX_MID='\033[38;5;228m'  # soft yellow
+C_BLOCKED='\033[38;5;210m'  # warning red
+C_IDLE='\033[38;5;246m'     # mid-grey
+C_NAME='\033[38;5;252m'     # near-white
+C_DIM='\033[38;5;240m'      # dim grey (model suffix)
+C_PURPOSE='\033[38;5;110m'  # muted blue (purpose/description)
+C_PATH='\033[38;5;244m'     # medium grey (filepath)
+RESET='\033[0m'
+
+SELF=$(command -v agent-picker 2>/dev/null || printf '%s' "$0")
+
+# ── tick mode: poke the open fzf until the popup closes ──────────────────
+# Launched in the background by fzf's `start` bind. Loops until fzf exits: the
+# --listen port stops answering, curl fails, the loop ends. No cleanup needed.
+if [ "${1:-}" = "--tick" ]; then
+  while curl -s "http://localhost:$FZF_PORT" \
+    -d "reload($SELF --list)+refresh-preview" >/dev/null 2>&1; do
+    sleep 0.5
+  done
+  exit 0
+fi
+
+# ── list mode: emit NUL-delimited fzf records, then exit ──────────────────
+# fzf runs this on start and on every tick to refresh the agent list.
+if [ "${1:-}" = "--list" ]; then
+
+# Collect pane data + coms registry in one Python call
+agent_data=$(python3 - "$COMS_DIR" <<'PYEOF'
+import json, os, glob, subprocess, sys, re
+
+coms_dir = sys.argv[1]
+
+# Load coms registry: pane_id -> entry (deduplicated; validate pid is alive)
+coms_map = {}
+for f in glob.glob(os.path.join(coms_dir, 'projects', '*', 'agents', '*.json')):
+    try:
+        d = json.load(open(f))
+        pane = d.get('tmux_pane')
+        pid  = d.get('pid')
+        if not pane:
+            continue
+        if pid:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue  # stale entry — agent exited
+            except PermissionError:
+                pass       # process exists but not ours — keep
+        if pane not in coms_map:
+            coms_map[pane] = d
+    except Exception:
+        pass
+
+# Get all tmux pane metadata
+r = subprocess.run(
+    ['tmux', 'list-panes', '-a', '-F',
+     '#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}\t#{window_name}\t#{pane_pid}\t#{@agent_state}\t#{pane_current_path}\t#{@agent_state_changed}'],
+    capture_output=True, text=True
+)
+
+# oh-my-tmux _pretty_path: collapse middle to /... rather than abbreviating
+home = os.path.expanduser('~')
+try:
+    max_length = int(subprocess.run(['tmux', 'display', '-p', '#{client_width}'],
+                                    capture_output=True, text=True).stdout) // 4
+except ValueError:
+    max_length = 20
+
+def pretty_path(path):
+    if path.startswith(home):
+        path = '~' + path[len(home):]
+    if len(path) <= max_length:
+        return path
+    path = re.sub(r'(~?/[^/]+)(/[^/]+)(?:/.+)?(/[^/]+)$', r'\1\2/...\3', path)
+    if len(path) <= max_length:
+        return path
+    return re.sub(r'(~?/[^/]+)(/[^/]+)(?:/.+)(/[^/]+)$', r'\1/...\3', path)
+
+for line in r.stdout.splitlines():
+    parts = line.split('\t')
+    if len(parts) < 7:
+        continue
+    pane_id, session, win, pane, wname, shell_pid, state = parts[:7]
+    state_changed = parts[8] if len(parts) > 8 else ''
+
+    entry = coms_map.get(pane_id)
+    if not entry:
+        continue
+
+    name  = entry['name']
+    model = entry.get('model', '')
+    ctx   = entry.get('context_used_pct', '')
+    purpose = entry.get('purpose', '').replace('\t', ' ').replace('\n', ' ')
+
+    if not state:
+        state = 'running' if entry.get('is_running') else 'idle'
+
+    cwd = pretty_path(parts[7]) if len(parts) > 7 else ''
+
+    print(f"{pane_id}\t{session}:{win}.{pane}\t{name}\t{state}\t{model}\t{ctx}\t{cwd}\t{purpose}\t{state_changed}")
+PYEOF
+)
+
+[ -z "$agent_data" ] && exit 0
+
+# Sort by state: idle (top) → running → blocked (bottom); stable within groups
+agent_data=$(printf '%s\n' "$agent_data" | awk -F'\t' '
+  BEGIN { p["blocked"]=0; p["running"]=1; p["idle"]=2 }
+  { ts = ($9+0 > 0) ? $9+0 : 0; print p[$4] "\t" ts "\t" NR "\t" $0 }
+' | sort -t$'\t' -k1,1n -k2,2nr -k3,3n | cut -f4-)
+
+# Format for fzf: NUL-delimited multi-line records
+#   line 1: icon + state + name + model·ctx suffix
+#   line 2: dim cwd
+#   line 3: dim purpose (if any) — visible so it's searchable
+#   trailing tab field: pane_id (hidden, used on accept)
+printf '%s\n' "$agent_data" | awk -F'\t' \
+  -v cr="$C_RUNNING" -v ci="$C_IDLE" \
+  -v cb="$C_BLOCKED" -v cw="$C_CTX_MID" -v cg="$C_RUNNING" \
+  -v cn="$C_NAME" -v cd="$C_DIM" -v cp="$C_PURPOSE" -v cf="$C_PATH" -v rs="$RESET" '
+  {
+    pane_id=$1; loc=$2; name=$3; state=$4; model=$5; ctx=$6; cwd=$7; purpose=$8
+
+    if      (state == "running") { icon=""; colour=cr }
+    else if (state == "blocked") { icon="⊘"; colour=cb }
+    else                         { icon=""; colour=ci; state="idle" }
+
+    ctxstr = (ctx != "") ? ctx "%" : ""
+    ctx_col = cd
+    if (ctx != "") {
+      if      (ctx+0 >= 75) ctx_col = cb
+      else if (ctx+0 >= 50) ctx_col = cw
+      else                  ctx_col = cg
+    }
+    model_s = model
+
+    sep1 = (state != ""  && name  != "") ? " " cd "·" rs " " : ""
+    sep2 = (name  != ""  && (ctxstr != "" || model_s != "")) ? " " cd "·" rs " " : ""
+    sep3 = (ctxstr != "" && model_s != "") ? " " cd "·" rs " " : ""
+
+    block = colour icon " " state rs sep1 cn "@" name rs
+    if (ctxstr != "" || model_s != "") block = block sep2 ctx_col ctxstr rs sep3 cd model_s rs
+    if (purpose != "") block = block "\n   " cp purpose rs
+    block = block "\n   " cf cwd rs
+
+    printf "%s\t%s%c", block, pane_id, 0
+  }'
+  exit 0
+fi
+
+# ── main: launch fzf and start the background ticker for live updates ───────
+selected=$("$SELF" --list | fzf \
+    --ansi \
+    --read0 \
+    --gap \
+    --delimiter='\t' \
+    --with-nth=1 \
+    --accept-nth=2 \
+    --highlight-line \
+    --track \
+    --listen 0 \
+    --preview='tmux capture-pane -p -e -t {2} 2>/dev/null | head -n "$(( $(tmux display -t {2} -p "#{cursor_y}") - 2 ))"' \
+    --preview-window='right:60%:wrap:follow' \
+    --prompt='› ' \
+    --bind="start:execute-silent($SELF --tick &)" \
+    --bind='focus:change-preview-window(follow)' \
+    --bind="ctrl-x:execute-silent(tmux kill-pane -t {2})+reload($SELF --list)" \
+    --bind='ctrl-u:preview-half-page-up+change-preview-window(nofollow),ctrl-d:preview-half-page-down+change-preview-window(follow)' \
+    --info=hidden \
+    --no-sort \
+    --height=100%)
+
+[ -z "$selected" ] && exit 0
+
+session=$(tmux display -t "$selected" -p "#{session_name}")
+window=$(tmux display -t "$selected" -p "#{window_index}")
+tmux switch-client -t "${session}:${window}"
+tmux select-pane -t "$selected"

@@ -15,7 +15,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   Theme,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
   getEditorHost,
   installEditorHost,
@@ -30,13 +30,13 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
   fuzzyFilter,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 import type {
   AutocompleteItem,
   AutocompleteProvider,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 import { spawnSync } from "node:child_process";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import * as net from "node:net";
 import * as fs from "node:fs";
 import * as path from "node:path";

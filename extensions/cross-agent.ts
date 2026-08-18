@@ -9,12 +9,12 @@
  * Usage: pi -e extensions/cross-agent.ts
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
 import { applyExtensionDefaults } from "./lib/themeMap.ts";
-import { wrapTextWithAnsi, visibleWidth } from "@mariozechner/pi-tui";
+import { wrapTextWithAnsi, visibleWidth } from "@earendil-works/pi-tui";
 
 // --- Synthwave palette ---
 function bg(s: string): string {

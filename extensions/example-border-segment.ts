@@ -19,7 +19,7 @@
  * enough; the first client to call installEditorHost() takes the editor slot.
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execFileSync } from "node:child_process";
 import { getEditorHost, installEditorHost } from "./editor-host.ts";
 

@@ -7,7 +7,7 @@
  * Usage: pi -e examples/extensions/pure-focus.ts
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { applyExtensionDefaults } from "./lib/themeMap.ts";
 
 export default function (pi: ExtensionAPI) {

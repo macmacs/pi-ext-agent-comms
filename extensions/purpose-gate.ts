@@ -8,8 +8,8 @@
  * Usage: pi -e extensions/purpose-gate.ts
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Text, truncateToWidth } from "@mariozechner/pi-tui";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { applyExtensionDefaults } from "./lib/themeMap.ts";
 
 // synthwave: bgWarm #4a1e6a → rgb(74,30,106)

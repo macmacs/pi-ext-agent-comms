@@ -7,8 +7,8 @@
  * Usage: pi -e extensions/tool-counter-widget.ts
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Box, Text } from "@mariozechner/pi-tui";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Box, Text } from "@earendil-works/pi-tui";
 import { applyExtensionDefaults } from "./lib/themeMap.ts";
 
 const palette = [

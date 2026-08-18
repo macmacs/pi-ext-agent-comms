@@ -16,8 +16,8 @@
  * Usage: pi -e extensions/subagent-widget.ts
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import * as fs from "fs";
 import * as net from "node:net";
 import * as crypto from "node:crypto";

@@ -26,10 +26,10 @@
  * `--name` and resumes it across sessions, so coms-net uses a distinct flag.
  */
 
-import type { ExtensionAPI, ExtensionContext, Theme } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
-import { truncateToWidth } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
+import { truncateToWidth } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 import { applyExtensionDefaults } from "./lib/themeMap.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";

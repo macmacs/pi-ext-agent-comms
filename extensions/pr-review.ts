@@ -23,9 +23,9 @@
  *   PR_REVIEW_MODEL_B       — override Agent B model
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
-import { Text, truncateToWidth } from "@mariozechner/pi-tui";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import * as fs from "node:fs";

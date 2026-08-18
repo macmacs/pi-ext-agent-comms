@@ -12,8 +12,8 @@
  * Usage: pi -e extensions/damage-control-continue.ts
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { parse as yamlParse } from "yaml";
 import * as fs from "fs";
 import * as path from "path";

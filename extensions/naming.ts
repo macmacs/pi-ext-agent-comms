@@ -15,7 +15,7 @@
  * ~/.pi/coms/name-state.json so picks stay diverse across restarts.
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 // No-op factory — this file is a helper module, not a real extension.
 export default function (_pi: ExtensionAPI) {}
 

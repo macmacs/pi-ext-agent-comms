@@ -19,7 +19,7 @@
  *   pi -e extensions/coms.ts -e extensions/subagent-widget.ts -e extensions/orchestrator.ts
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const DELEGATE_TOOLS = [
   "subagent_create",

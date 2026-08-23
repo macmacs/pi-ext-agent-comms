@@ -2887,7 +2887,10 @@ export default function (pi: ExtensionAPI) {
       // instead of stacking a duplicate follow-up (which would respawn twice).
       const queuedNow = !respawnFollowUpQueued;
       if (queuedNow) {
-        pi.sendUserMessage("/coms-respawn", { deliverAs: "followUp" });
+        pi.sendUserMessage("/coms-respawn", {
+          deliverAs: "followUp",
+          expandPromptTemplates: true,
+        });
         respawnFollowUpQueued = true;
       }
       return {
@@ -3269,7 +3272,10 @@ export default function (pi: ExtensionAPI) {
         // once this turn settles; respawning now would race the active turn.
         pendingRespawn = pending;
         try {
-          pi.sendUserMessage("/coms-respawn", { deliverAs: "followUp" });
+          pi.sendUserMessage("/coms-respawn", {
+            deliverAs: "followUp",
+            expandPromptTemplates: true,
+          });
           respawnFollowUpQueued = true;
         } catch {
           /* ignore */

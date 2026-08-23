@@ -69,7 +69,45 @@ just hub                                 # hub + agents on one machine
 just coms --name dev --cname dev         # networked peer
 just coms-model <model> --name x --cname x
 just team dev prod review                # hub + one tmux window per peer
+just respawn-demo                        # scripted respawn smoke test (steps)
+just respawn-demo sid researcher         # current registered sid (snapshot before)
+just respawn-demo verify researcher "respawned for the smoke test"
 ```
+
+## Respawn demo (context shedding)
+
+Respawn replaces a peer's session in-process: same pid, same TUI, fresh context. Scripted smoke test via `just respawn-demo` (prints the steps) between two role-file peers, `just role orchestrator` and `just role researcher`.
+
+### Flow
+
+1. **Request** — the orchestrator agent calls `coms_request_respawn` targeting `researcher` (carries a kickoff note and optional conversation id). The peer agent decides whether to agree; an ack timeout surfaces if it never answers.
+2. **Command dispatch** — tools get `ExtensionContext`, not `ExtensionCommandContext`, so they can't drive session replacement directly. `coms_respawn`/`coms_request_respawn` stash the note and queue `/coms-respawn` as a follow-up; pi's prompt-template expansion routes it to the registered command handler instead of the model.
+3. **newSession** — the handler sets a `respawning` flag (cleanShutdown reads it to keep the registry entry alive), then calls `ctx.newSession` and sends the kickoff note as the fresh session's first user message.
+4. **Registry update** — the peer re-registers with the same `pid`, a new `session_id`, and a new `started_at`; peers observing via `coms_list` see the new sid under the same name.
+
+### Scripted steps and expected observations
+
+```bash
+just respawn-demo                                  # prints the full script
+just respawn-demo sid researcher                   # snapshot the pre-respawn sid
+# ... in the orchestrator TUI, prompt the agent to:
+#     call coms_request_respawn targeting researcher with note "respawned for the smoke test"
+# ... on the researcher TUI, approve any "Clear session?" gate if present
+just respawn-demo verify researcher "respawned for the smoke test"
+```
+
+`verify` checks three on-disk invariants:
+
+- `~/.pi/coms/projects/team/agents/researcher.json` — `session_id` changed vs the snapshot, `pid` unchanged, `started_at` updated.
+- The session jsonl under `~/.pi/agent/sessions/--Users-macmacs-repos-pi-ext-agent-comms--/` whose `coms-log` boot event carries the new `session_id` (respawn writes a new jsonl; all peers launched from this repo share the dir, so match by boot event, not mtime).
+- The kickoff note appears as that session's first user message — identity preservation (role file replays via system-prompt regeneration) is confirmed by the peer still answering as `researcher`.
+
+Smoke-tested end to end: old sid `01M0QY5RVMY2EB68QAC3FCWTBB` → new `01M0QY9WJHFPD3HQK5FM8TRM5K`, same pid, kickoff note landed as the fresh session's first message.
+
+### Gotchas
+
+- **`expandPromptTemplates: true` is mandatory** on the queued follow-up. `pi.sendUserMessage()` defaults it to false, so `/coms-respawn` goes to the model as a literal prompt and `_tryExecuteExtensionCommand` is never called — the peer hallucinates a fresh session without any `newSession` happening. Both call sites in `coms.ts` (the `coms_respawn` tool and the waitForIdle re-queue path) pass it explicitly.
+- **Interactive sessions may show a confirm gate.** When the confirm-destructive extension is active, the TUI pauses at a "Clear session?" `session_before_switch` gate before the session is replaced — approve it manually. Headless (non-interactive) peers skip the gate, so the demo needs a human at the researcher TUI only when that extension is present.
 
 ## Example prompts (from the Pi to Pi video)
 

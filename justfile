@@ -42,6 +42,15 @@ coms *args:
 coms-model model *args:
     pi -e extensions/coms-net.ts --model {{model}} {{args}}
 
+# ---------------------- respawn demo -------------------------------------------
+
+# Scripted respawn smoke test between two role-file peers (orchestrator + researcher).
+#   just respawn-demo                          # print the scripted steps
+#   just respawn-demo sid researcher           # current registered session id (snapshot before)
+#   just respawn-demo verify researcher "respawned for the smoke test"
+respawn-demo *args="":
+    ./scripts/respawn-demo.sh {{args}}
+
 # ---------------------- tmux team --------------------------------------------
 
 # Flat team in one tmux session: hub window + one window per peer.

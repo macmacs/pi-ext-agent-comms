@@ -73,7 +73,7 @@ const FALLBACK_PALETTE = [
 
 // ━━ Types ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-type EnvelopeType = "prompt" | "ping" | "tree_ping";
+type EnvelopeType = "prompt" | "ping" | "tree_ping" | "respawn_request";
 
 interface Envelope {
   type: EnvelopeType;
@@ -87,6 +87,14 @@ interface Envelope {
 interface PromptEnvelope extends Envelope {
   type: "prompt";
   prompt: string;
+  sender_name: string;
+  sender_cwd: string;
+  conversation_id?: string | null;
+}
+
+interface RespawnRequestEnvelope extends Envelope {
+  type: "respawn_request";
+  reason?: string | null;
   sender_name: string;
   sender_cwd: string;
   conversation_id?: string | null;
@@ -145,6 +153,7 @@ interface StatusMessage {
   is_running: boolean;
   is_blocked?: boolean;
   closing?: boolean;
+  respawning?: boolean;
   // Relay fields — present when this event was forwarded up the tree.
   // origin_session is WHO this event is about (may differ from sender_session).
   // Falls back to sender_session for compat with older coms instances.
@@ -458,6 +467,31 @@ function pruneDeadEntriesAllProjects(): RegistryEntry[] {
   return out;
 }
 
+// Respawn: the outgoing session skips registry removal (its entry must survive
+// the shutdown/start gap), so on session_start the previous entry is still on
+// disk and shares our pid. Prune pid-owned entries before name resolution or we
+// collide with our own past self. Safe because a pid identifies exactly one
+// process: entries matching ours are stale copies of us, never live peers.
+function pruneEntriesOwnedByPid(pid: number): void {
+  const root = path.join(COMS_DIR, "projects");
+  let projects: string[];
+  try {
+    projects = fs.readdirSync(root);
+  } catch {
+    return;
+  }
+  for (const p of projects) {
+    try {
+      if (!fs.statSync(path.join(root, p)).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    for (const entry of readAllRegistryEntries(p)) {
+      if (entry.pid === pid) removeRegistryEntry(p, entry.name);
+    }
+  }
+}
+
 function keepaliveTouch(file: string): void {
   try {
     const now = new Date();
@@ -736,6 +770,14 @@ export default function (pi: ExtensionAPI) {
   let spinnerTimer: NodeJS.Timeout | null = null;
   const host = getEditorHost();
   let leaderActive = false;
+  // Set by the /coms-respawn command before ctx.newSession; read by
+  // cleanShutdown to broadcast a respawning status and skip registry removal.
+  let respawning = false;
+  // Stash between the coms_respawn tool and the /coms-respawn command it queues.
+  let pendingRespawn: { note?: string; conversation_id?: string } | null = null;
+  // Thread id from the most recent inbound respawn_request, so a respawn that
+  // answers a peer's request can carry the conversation id into the kickoff.
+  let lastRespawnRequestConversationId: string | null = null;
 
   // All pools this agent is registered in and reads from.
   // Always includes identity.project (own-name pool); extraProjects adds named pools.
@@ -830,6 +872,54 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  function handleRespawnRequest(
+    socket: net.Socket,
+    env: RespawnRequestEnvelope,
+  ): void {
+    // 1. Hop limit check
+    if (typeof env.hops !== "number" || env.hops >= MAX_HOPS) {
+      nack(socket, env.msg_id, "hops exceeded");
+      return;
+    }
+
+    // Stash the conversation thread so coms_respawn can carry it into the
+    // fresh session's kickoff.
+    lastRespawnRequestConversationId = env.conversation_id ?? null;
+
+    // Steer the receiver immediately; the receiver decides. Message-not-command:
+    // nothing is forced — the target agent chooses whether to call coms_respawn.
+    try {
+      pi.sendMessage(
+        {
+          customType: "coms-inbound",
+          content: `[coms · from ${env.sender_name}]\n\nPeer ${env.sender_name} requests that you respawn.${env.reason ? ` Reason: ${env.reason}` : ""} If you agree, call coms_respawn with a note.`,
+          display: true,
+          details: {
+            msg_id: env.msg_id,
+            hops: env.hops,
+            sender_name: env.sender_name,
+          },
+        },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
+    } catch (err) {
+      nack(socket, env.msg_id, "internal error");
+      return;
+    }
+
+    ackOk(socket, env.msg_id);
+    try {
+      pi.appendEntry("coms-log", {
+        event: "inbound_respawn_request",
+        msg_id: env.msg_id,
+        sender: env.sender_name,
+        hops: env.hops,
+      });
+    } catch {
+      // best-effort
+    }
+  }
+
   function handlePing(socket: net.Socket, env: PingEnvelope): void {
     const ctx = currentCtx;
     const ident = identity;
@@ -903,6 +993,7 @@ export default function (pi: ExtensionAPI) {
               false,
               undefined,
               true,
+              false,
               relayDepth,
             );
           }
@@ -961,6 +1052,7 @@ export default function (pi: ExtensionAPI) {
       }
       existing.is_running = msg.is_running;
       existing.is_blocked = msg.is_blocked ?? false;
+      (existing as any).respawning = msg.respawning === true;
       (existing as any).lastSeenAt = Date.now();
       updateSpinnerTimer();
       host.requestRender();
@@ -977,6 +1069,7 @@ export default function (pi: ExtensionAPI) {
         context_used_pct: cardData.context_used_pct ?? null,
         is_running: msg.is_running ?? false,
         is_blocked: msg.is_blocked ?? false,
+        respawning: msg.respawning === true,
         staleCount: 0,
         lastSeenAt: Date.now(),
       } as any);
@@ -1012,6 +1105,7 @@ export default function (pi: ExtensionAPI) {
         msg.is_running,
         msg.is_blocked,
         false,
+        msg.respawning === true,
         relayDepth,
       );
     }
@@ -1044,6 +1138,7 @@ export default function (pi: ExtensionAPI) {
     isRunning: boolean,
     isBlocked: boolean | undefined,
     closing: boolean,
+    respawning: boolean,
     relayDepth: number,
   ): Promise<void> {
     if (!identity || relayDepth >= MAX_RELAY_DEPTH) return Promise.resolve();
@@ -1054,6 +1149,7 @@ export default function (pi: ExtensionAPI) {
         is_running: isRunning,
         is_blocked: isBlocked || undefined,
         closing: closing || undefined,
+        respawning: respawning || undefined,
         sender_session: identity.session_id,
         origin_session: originSid,
         origin_card: originCard,
@@ -1139,13 +1235,15 @@ export default function (pi: ExtensionAPI) {
   function broadcastStatus(
     is_running: boolean,
     closing = false,
+    respawning = false,
   ): Promise<void> {
     if (!identity) return Promise.resolve();
     const entries = readAllDisplayEntries();
     // Broadcast effective (cascaded) status so the parent sees the subtree state.
-    const effective = closing
-      ? { running: false, blocked: false }
-      : recomputeEffective();
+    const effective =
+      closing || respawning
+        ? { running: false, blocked: false }
+        : recomputeEffective();
     // Surface state to the tmux pane so agent-picker can show running/idle/blocked.
     const pane = process.env.TMUX_PANE;
     if (pane) {
@@ -1177,6 +1275,7 @@ export default function (pi: ExtensionAPI) {
         is_running: effective.running,
         is_blocked: effective.blocked || undefined,
         closing: closing || undefined,
+        respawning: respawning || undefined,
         sender_session: identity.session_id,
         origin_session: identity.session_id,
         origin_card: selfCard,
@@ -1212,7 +1311,10 @@ export default function (pi: ExtensionAPI) {
 
   function updateSpinnerTimer(): void {
     const anyRunning =
-      agentRunning || [...peerCards.values()].some((c) => c.is_running);
+      agentRunning ||
+      [...peerCards.values()].some(
+        (c) => c.is_running || (c as any).respawning === true,
+      );
     if (anyRunning && !spinnerTimer) {
       spinnerTimer = setInterval(() => {
         spinnerFrame = (spinnerFrame + 1) % SPINNER_FRAMES.length;
@@ -1286,6 +1388,8 @@ export default function (pi: ExtensionAPI) {
           handlePing(socket, parsed as PingEnvelope);
         } else if (parsed.type === "tree_ping") {
           void handleTreePing(socket, parsed as TreePingEnvelope);
+        } else if (parsed.type === "respawn_request") {
+          handleRespawnRequest(socket, parsed as RespawnRequestEnvelope);
         } else if (parsed.type === "status") {
           handleStatus(socket, parsed as StatusMessage);
         } else {
@@ -1317,6 +1421,11 @@ export default function (pi: ExtensionAPI) {
       flags.project && flags.project !== "default" ? flags.project : null;
     const explicit = flags.explicit === true;
     const session_id = ulid();
+
+    // Respawn leaves our previous-session entry on disk (cleanShutdown skips
+    // removal). Same pid identifies it as ours; prune before name resolution
+    // or we collide with our own past self.
+    pruneEntriesOwnedByPid(process.pid);
 
     const liveNames = new Set(pruneDeadEntriesAllProjects().map((e) => e.name));
     const defaultName =
@@ -1454,6 +1563,9 @@ export default function (pi: ExtensionAPI) {
     };
     includeExplicit = false;
     firstTurnDone = false;
+    respawning = false;
+    pendingRespawn = null;
+    lastRespawnRequestConversationId = null;
     extraProjects = namedProject ? [namedProject] : [];
     // Expose identity so co-loaded extensions (subagent-widget etc.) can read it.
     process.env.PI_COMS_PROJECT = name;
@@ -2130,6 +2242,7 @@ export default function (pi: ExtensionAPI) {
     stale: boolean;
     running: boolean;
     blocked: boolean;
+    respawning: boolean;
     relationship: "parent" | "child" | "sibling" | "peer";
     depth: number; // 0=direct peer, 1=child, 2=grandchild, etc. — drives tree indentation
   }
@@ -2203,6 +2316,7 @@ export default function (pi: ExtensionAPI) {
           : (card.staleCount ?? 0) >= 3,
         running: card.is_running ?? false,
         blocked: card.is_blocked ?? false,
+        respawning: (card as any).respawning === true,
         relationship: sessionRelationship(sid),
         depth: visualDepth(sid),
       });
@@ -2224,6 +2338,7 @@ export default function (pi: ExtensionAPI) {
         stale: false,
         running: false,
         blocked: false,
+        respawning: false,
         relationship: sessionRelationship(entry.session_id),
         depth: visualDepth(entry.session_id),
       });
@@ -2405,14 +2520,19 @@ export default function (pi: ExtensionAPI) {
 
       const swatch = r.blocked
         ? theme.fg("warning", "⊘")
-        : r.running
-          ? hexFg(
-              r.color,
+        : r.respawning
+          ? theme.fg(
+              "warning",
               SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]!,
             )
-          : r.pending
-            ? theme.fg("dim", "●")
-            : hexFg(r.color, "●");
+          : r.running
+            ? hexFg(
+                r.color,
+                SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]!,
+              )
+            : r.pending
+              ? theme.fg("dim", "●")
+              : hexFg(r.color, "●");
       const namePart = !useRelIcon
         ? theme.fg("dim", (indent + r.name).padEnd(11 + indent.length))
         : theme.fg("accent", r.name.padEnd(11));
@@ -2720,6 +2840,177 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // ━━ coms_respawn / coms_request_respawn ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Tools can't drive session replacement directly (tools get ExtensionContext,
+  // not ExtensionCommandContext). coms_respawn queues the /coms-respawn command
+  // as a follow-up user message; the command handler does the real work.
+
+  pi.registerTool({
+    name: "coms_respawn",
+    label: "Coms Respawn",
+    description:
+      "Respawn your own agent session: shed stale context by starting a fresh session in-process. " +
+      "Your identity (role file) carries over via pi's system-prompt regeneration. " +
+      "Queues the /coms-respawn command as a follow-up; takes effect once the current turn settles.",
+    parameters: Type.Object({
+      note: Type.Optional(
+        Type.String({
+          description:
+            "Kickoff note for your fresh session (what you're continuing). Defaults to a generic continue-work note.",
+        }),
+      ),
+    }),
+    async execute(_callId, params) {
+      if (!identity) {
+        throw new Error("coms not initialised");
+      }
+      pendingRespawn = {
+        note: params.note || undefined,
+        conversation_id: lastRespawnRequestConversationId ?? undefined,
+      };
+      lastRespawnRequestConversationId = null;
+      pi.sendUserMessage("/coms-respawn", { deliverAs: "followUp" });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "Queued /coms-respawn as a follow-up. Your session will be replaced with a fresh one once the current turn settles.",
+          },
+        ],
+        details: {
+          note: params.note ?? null,
+          conversation_id: pendingRespawn.conversation_id ?? null,
+        },
+      };
+    },
+    renderCall(args, theme) {
+      const note = (args as any).note ?? "";
+      const preview = note.length > 60 ? note.slice(0, 57) + "..." : note;
+      return new Text(
+        theme.fg("toolTitle", theme.bold("coms_respawn")) +
+          (preview
+            ? theme.fg("dim", " — ") + theme.fg("muted", preview)
+            : ""),
+        0,
+        0,
+      );
+    },
+    renderResult(result, _options, theme) {
+      const t = result.content[0];
+      return new Text(
+        theme.fg("success", "↻ ") + (t?.type === "text" ? t.text : ""),
+        0,
+        0,
+      );
+    },
+  });
+
+  pi.registerTool({
+    name: "coms_request_respawn",
+    label: "Coms Request Respawn",
+    description:
+      "Ask a peer agent to respawn its session (shed stale context). The peer sees the request " +
+      "as a message and decides for itself; nothing is forced. Ack-on-delivery like coms_send. " +
+      "conversation_id is auto-filled with your session id so the peer's fresh session can " +
+      "correlate the exchange. Throws if the peer is unreachable.",
+    parameters: Type.Object({
+      to: Type.String({
+        description:
+          "Peer name (preferred, scoped to your project) or session_id (global).",
+      }),
+      reason: Type.Optional(
+        Type.String({
+          description: "Why the peer should respawn (shown to the peer).",
+        }),
+      ),
+    }),
+    async execute(_callId, params) {
+      if (!identity) {
+        throw new Error("coms not initialised");
+      }
+      const target = resolveTarget(params.to);
+      if (!target) {
+        throw new Error(`coms: no live agent matching "${params.to}"`);
+      }
+      const hops = currentInbound ? currentInbound.hops + 1 : 0;
+      if (hops >= MAX_HOPS) {
+        throw new Error(`coms: hop limit reached (${hops} >= ${MAX_HOPS})`);
+      }
+      const msg_id = ulid();
+      const env: RespawnRequestEnvelope = {
+        type: "respawn_request",
+        msg_id,
+        sender_session: identity.session_id,
+        sender_endpoint: identity.endpoint,
+        sender_name: identity.name,
+        sender_cwd: identity.cwd,
+        hops,
+        timestamp: nowIso(),
+        reason: params.reason ?? null,
+        // Auto-filled: the sender's session id is the stable end of the
+        // exchange (the receiver's session is about to be replaced), so it
+        // threads the conversation across the receiver's respawn.
+        conversation_id: identity.session_id,
+      };
+
+      await sendEnvelope(target.endpoint, env);
+      try {
+        pi.appendEntry("coms-log", {
+          event: "outbound_respawn_request",
+          msg_id,
+          target: target.name,
+          hops,
+        });
+      } catch {
+        /* best-effort */
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `coms_request_respawn → ${target.name}`,
+          },
+        ],
+        details: {
+          msg_id,
+          target: target.name,
+          target_session: target.session_id,
+          hops,
+        },
+      };
+    },
+    renderCall(args, theme) {
+      const tgt = (args as any).to ?? "?";
+      const reason = (args as any).reason ?? "";
+      const preview = reason.length > 60 ? reason.slice(0, 57) + "..." : reason;
+      return new Text(
+        theme.fg("toolTitle", theme.bold("coms_request_respawn ")) +
+          theme.fg("accent", tgt) +
+          (preview
+            ? theme.fg("dim", " — ") + theme.fg("muted", preview)
+            : ""),
+        0,
+        0,
+      );
+    },
+    renderResult(result, _options, theme) {
+      const d = result.details as any;
+      if (!d) {
+        const t = result.content[0];
+        return new Text(t?.type === "text" ? t.text : "", 0, 0);
+      }
+      return new Text(
+        theme.fg("success", "↻ ") +
+          theme.fg("accent", d.target) +
+          theme.fg("dim", `  msg_id `) +
+          theme.fg("warning", d.msg_id),
+        0,
+        0,
+      );
+    },
+  });
+
   // ━━ agent_start: arm currentInbound for hop-count inheritance ━━━━━━━━━━━━━━
   // Reads hops directly from the coms-inbound message details.
   // Proactive (non-coms) turns set currentInbound = null so outbound
@@ -2936,11 +3227,86 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // ━━ /coms-respawn command ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Queued by the coms_respawn tool. Only the command context (not the tool
+  // context) can drive session replacement, so the real work lives here.
+  pi.registerCommand("coms-respawn", {
+    description:
+      "Respawn this agent's session in-process: fresh context, same identity (role file)",
+    handler: async (_args, ctx) => {
+      if (!identity) return;
+      const pending = pendingRespawn;
+      try {
+        await ctx.waitForIdle();
+      } catch {
+        // Agent never settled — leave the note queued and bail; respawn would race.
+        pendingRespawn = pending;
+        try {
+          ctx.ui.notify("coms: couldn't reach idle, respawn aborted", "warning");
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      pendingRespawn = null;
+
+      // Kickoff always fires a turn: the trigger note if provided, else the
+      // default. When the triggering request carried a conversation id, thread it.
+      let kickoff: string;
+      const conversationId = pending?.conversation_id;
+      const continuation = conversationId
+        ? `\n\nContinuing conversation ${conversationId}.`
+        : "";
+      if (pending?.note && pending.note.trim()) {
+        kickoff = pending.note.trim() + continuation;
+      } else {
+        kickoff =
+          "You respawned to shed stale context. Continue your current work." +
+          continuation;
+      }
+
+      // Flag before newSession: cleanShutdown (session_shutdown) reads it to
+      // broadcast a respawning status and keep the registry entry alive.
+      respawning = true;
+      const parentSession = ctx.sessionManager.getSessionFile();
+
+      let cancelled = true;
+      try {
+        const result = await ctx.newSession({
+          parentSession,
+          withSession: async (freshCtx) => {
+            await freshCtx.sendUserMessage(kickoff);
+          },
+        });
+        cancelled = result.cancelled === true;
+      } catch {
+        cancelled = true;
+      }
+
+      if (cancelled) {
+        respawning = false;
+        try {
+          await broadcastStatus(agentRunning);
+        } catch {
+          /* ignore */
+        }
+        try {
+          ctx.ui.notify("coms: respawn cancelled", "warning");
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+  });
+
   // ━━ Clean shutdown ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   let shuttingDown = false;
   async function cleanShutdown(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
+    // Respawn keeps the registry entry alive across the shutdown/start gap;
+    // peers are told the transition is intentional (respawning), not a close.
+    const isRespawn = respawning;
     // Cascade shutdown to subagents — kill the subs tmux session before any
     // await so this runs synchronously even under abrupt kill (SIGHUP/SIGTERM).
     if (identity) {
@@ -2950,7 +3316,7 @@ export default function (pi: ExtensionAPI) {
         /* no subs session — ignore */
       }
     }
-    await broadcastStatus(false, true);
+    await broadcastStatus(false, !isRespawn, isRespawn);
     if (pingTimer) {
       try {
         clearInterval(pingTimer);
@@ -2991,20 +3357,22 @@ export default function (pi: ExtensionAPI) {
           /* ignore */
         }
       }
-      try {
-        for (const p of allProjects()) {
-          try {
-            removeRegistryEntry(p, identity.name);
-          } catch {
-            /* ignore */
+      if (!isRespawn) {
+        try {
+          for (const p of allProjects()) {
+            try {
+              removeRegistryEntry(p, identity.name);
+            } catch {
+              /* ignore */
+            }
           }
+        } catch {
+          /* ignore */
         }
-      } catch {
-        /* ignore */
       }
       try {
         pi.appendEntry("coms-log", {
-          event: "shutdown",
+          event: isRespawn ? "respawn" : "shutdown",
           session_id: identity.session_id,
         });
       } catch {

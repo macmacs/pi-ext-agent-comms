@@ -54,6 +54,9 @@ const MAX_RELAY_DEPTH = 5; // max hops a status event propagates up the agent tr
 const PING_INTERVAL_MS = Number(process.env.PI_COMS_PING_INTERVAL_MS) || 10_000;
 const KEEPALIVE_INTERVAL_MS = 30_000;
 const TREE_PING_HOP_TIMEOUT_MS = 3_000;
+// All sendEnvelope users expect a prompt ack (prompt/ping/tree_ping/respawn),
+// so a wedged peer that never acks must not hang the calling tool forever.
+const SEND_TIMEOUT_MS = 15_000;
 const TREE_PING_MAX_DEPTH = 5;
 const STALE_TIMEOUT_MS = PING_INTERVAL_MS * 3; // evict after 3 missed cascade cycles
 const IS_ROOT = !process.env.PI_PARENT_SESSION;
@@ -607,6 +610,7 @@ function sendEnvelope(
     const fail = (err: Error) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
       try {
         sock.destroy();
       } catch {
@@ -614,6 +618,17 @@ function sendEnvelope(
       }
       reject(err);
     };
+    // A peer that accepts the connection but never acks would otherwise hang
+    // the calling tool forever (e.g. coms_request_respawn to a wedged agent).
+    const timer = setTimeout(
+      () => fail(new Error(`coms: no ack from peer within ${SEND_TIMEOUT_MS}ms`)),
+      SEND_TIMEOUT_MS,
+    );
+    try {
+      (timer as any).unref?.();
+    } catch {
+      /* ignore */
+    }
     sock.once("error", fail);
     sock.once("connect", async () => {
       try {
@@ -627,6 +642,7 @@ function sendEnvelope(
         }
         if (settled) return;
         settled = true;
+        clearTimeout(timer);
         if (parsed && parsed.type === "nack") {
           reject(new Error(parsed.error || "nack"));
         } else {
@@ -729,6 +745,7 @@ export default function (pi: ExtensionAPI) {
     cwd: string;
     model: string;
     endpoint: string;
+    started_at: string;
     registryFiles: string[];
     tmux_session?: string;
     tmux_window?: string;
@@ -775,6 +792,10 @@ export default function (pi: ExtensionAPI) {
   let respawning = false;
   // Stash between the coms_respawn tool and the /coms-respawn command it queues.
   let pendingRespawn: { note?: string; conversation_id?: string } | null = null;
+  // True while a /coms-respawn follow-up is queued but not yet consumed, so a
+  // second coms_respawn call in the same session updates the note instead of
+  // stacking a duplicate respawn.
+  let respawnFollowUpQueued = false;
   // Thread id from the most recent inbound respawn_request, so a respawn that
   // answers a peer's request can carry the conversation id into the kickoff.
   let lastRespawnRequestConversationId: string | null = null;
@@ -1556,6 +1577,7 @@ export default function (pi: ExtensionAPI) {
       cwd,
       model,
       endpoint,
+      started_at: nowIso(),
       registryFiles,
       tmux_session: tmuxSession,
       tmux_window: tmuxWindow,
@@ -1565,6 +1587,7 @@ export default function (pi: ExtensionAPI) {
     firstTurnDone = false;
     respawning = false;
     pendingRespawn = null;
+    respawnFollowUpQueued = false;
     lastRespawnRequestConversationId = null;
     extraProjects = namedProject ? [namedProject] : [];
     // Expose identity so co-loaded extensions (subagent-widget etc.) can read it.
@@ -1839,7 +1862,7 @@ export default function (pi: ExtensionAPI) {
           pid: process.pid,
           endpoint: identity.endpoint,
           cwd: identity.cwd,
-          started_at: nowIso(),
+          started_at: identity.started_at,
           explicit: identity.explicit,
           version: 1,
           context_used_pct: Math.round(ctx?.getContextUsage()?.percent ?? 0),
@@ -2869,12 +2892,20 @@ export default function (pi: ExtensionAPI) {
         conversation_id: lastRespawnRequestConversationId ?? undefined,
       };
       lastRespawnRequestConversationId = null;
-      pi.sendUserMessage("/coms-respawn", { deliverAs: "followUp" });
+      // One respawn per session: a second call updates the pending note
+      // instead of stacking a duplicate follow-up (which would respawn twice).
+      const queuedNow = !respawnFollowUpQueued;
+      if (queuedNow) {
+        pi.sendUserMessage("/coms-respawn", { deliverAs: "followUp" });
+        respawnFollowUpQueued = true;
+      }
       return {
         content: [
           {
             type: "text" as const,
-            text: "Queued /coms-respawn as a follow-up. Your session will be replaced with a fresh one once the current turn settles.",
+            text: queuedNow
+              ? "Queued /coms-respawn as a follow-up. Your session will be replaced with a fresh one once the current turn settles."
+              : "coms_respawn already queued — note updated. It takes effect once the current turn settles.",
           },
         ],
         details: {
@@ -3140,7 +3171,7 @@ export default function (pi: ExtensionAPI) {
           pid: process.pid,
           endpoint: identity.endpoint,
           cwd: identity.cwd,
-          started_at: nowIso(),
+          started_at: identity.started_at,
           explicit: identity.explicit,
           version: 1,
           context_used_pct: Math.round(ctx?.getContextUsage()?.percent ?? 0),
@@ -3200,7 +3231,7 @@ export default function (pi: ExtensionAPI) {
               pid: process.pid,
               endpoint: identity.endpoint,
               cwd: identity.cwd,
-              started_at: nowIso(),
+              started_at: identity.started_at,
               explicit: identity.explicit,
               version: 1,
             };
@@ -3235,14 +3266,24 @@ export default function (pi: ExtensionAPI) {
       "Respawn this agent's session in-process: fresh context, same identity (role file)",
     handler: async (_args, ctx) => {
       if (!identity) return;
+      // This command was queued by coms_respawn; clear the queue marker so a
+      // later coms_respawn call in this session queues a fresh follow-up.
+      respawnFollowUpQueued = false;
       const pending = pendingRespawn;
       try {
         await ctx.waitForIdle();
       } catch {
-        // Agent never settled — leave the note queued and bail; respawn would race.
+        // Agent never settled — re-queue the follow-up so the respawn retries
+        // once this turn settles; respawning now would race the active turn.
         pendingRespawn = pending;
         try {
-          ctx.ui.notify("coms: couldn't reach idle, respawn aborted", "warning");
+          pi.sendUserMessage("/coms-respawn", { deliverAs: "followUp" });
+          respawnFollowUpQueued = true;
+        } catch {
+          /* ignore */
+        }
+        try {
+          ctx.ui.notify("coms: couldn't reach idle, respawn re-queued", "warning");
         } catch {
           /* ignore */
         }

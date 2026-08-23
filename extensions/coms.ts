@@ -495,15 +495,6 @@ function pruneEntriesOwnedByPid(pid: number): void {
   }
 }
 
-function keepaliveTouch(file: string): void {
-  try {
-    const now = new Date();
-    fs.utimesSync(file, now, now);
-  } catch {
-    // best-effort
-  }
-}
-
 // ━━ Transport ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 function probeStaleSocket(endpoint: string): Promise<"in_use" | "stale"> {
@@ -1412,7 +1403,7 @@ export default function (pi: ExtensionAPI) {
         } else if (parsed.type === "respawn_request") {
           handleRespawnRequest(socket, parsed as RespawnRequestEnvelope);
         } else if (parsed.type === "status") {
-          handleStatus(socket, parsed as StatusMessage);
+          handleStatus(socket, parsed as unknown as StatusMessage);
         } else {
           nack(socket, parsed.msg_id, "unknown type");
         }
@@ -3101,7 +3092,8 @@ export default function (pi: ExtensionAPI) {
       if (entry.type !== "message" || !entry.message?.role) continue;
       const role: string = entry.message.role;
       if (role !== "user" && role !== "assistant") continue;
-      const content = entry.message.content;
+      const content =
+        "content" in entry.message ? entry.message.content : undefined;
       const text =
         typeof content === "string"
           ? content

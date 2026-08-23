@@ -10,6 +10,14 @@ default:
 local-coms *args:
     pi -e extensions/coms.ts {{args}}
 
+# Role-file peer (identity from roles/<name>.md; replays across respawn):
+#   just role orchestrator   # or: builder / researcher
+role name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -f "roles/{{name}}.md" || { echo "role file roles/{{name}}.md not found" >&2; exit 1; }
+    exec pi -e extensions/coms.ts --cname {{name}} --append-system-prompt roles/{{name}}.md --project team
+
 # ---------------------- coms-net (HTTP/SSE hub) ------------------------------
 
 # Hub on 127.0.0.1 (kills any stale process on the pinned port first)

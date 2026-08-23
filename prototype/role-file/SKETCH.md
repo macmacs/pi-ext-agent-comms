@@ -49,9 +49,11 @@ Precedence stays as today: CLI flags > frontmatter > defaults. `--cname` wins ov
 
 Costs: the initial session never gets the role in the system prompt (coms would have to inject it at `session_start`, racy); every respawn re-injects a large user message; the role is demoted from system prompt to transcript message; new flag + parser + replay code. Wins nothing except keeping ticket 4's wording. Rejected unless the user overrides.
 
-## Open choices (for the HITL round)
+## Verdict (HITL round, resolved)
 
-- Q1 Carrier and persistence route: system-prompt flags (recommended, amends ticket 4) vs dedicated `--role-file` flag (keeps ticket 4).
-- Q2 If reusing the builtin flags: `--append-system-prompt` (role augments the default harness prompt; recommended) vs `--system-prompt` (role replaces it).
-- Q3 File convention: repo `roles/<cname>.md` (recommended) vs `~/.pi/roles/<cname>.md` vs per-role dirs.
-- Known wrinkle (accepted): frontmatter leaks into the system prompt; missing file leaks the path string.
+- Q1 Carrier and persistence route: **system-prompt flags**. Ticket 4's `setup` clause is dropped; see the amendment comment on that ticket.
+- Q2 Flag: **`--append-system-prompt`** is the convention default (role augments the default harness prompt). `--system-prompt` remains supported for roles that want full prompt control.
+- Q3 File convention: repo `roles/<cname>.md` now; **`~/.pi/roles/<cname>.md` as the end goal** once the roles are shaped. Identical format, only the launcher path changes.
+- Q4 Wrinkles: **both accepted** - the 3-line frontmatter rides in the system prompt; a missing file leaks the literal path as prompt text, so the just recipe checks existence first.
+
+This prototype answered its question; the sketch below stays as the convention reference for the implementation ticket. Delete this directory once ticket 6 lands.

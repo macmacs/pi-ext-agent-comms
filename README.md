@@ -3,7 +3,7 @@
 Peer-to-peer agent communication for the Pi coding agent. Two extensions:
 
 - **coms** (`extensions/coms.ts`): local agent-to-agent messaging over unix sockets. Flat peer team, no orchestrator. Any agent can ping, prompt, and await responses from any other agent in the pool.
-- **coms-net** (`extensions/coms-net.ts`): the same protocol over a network hub (Bun HTTP/SSE server), for agents on other machines or sandboxes (E2B, exe.dev, etc.).
+- **coms-net** (`extensions/coms-net.ts`): the same protocol over a network hub (Bun HTTP/SSE server), for agents on other machines or sandboxes (E2B, exe.dev, etc.). Remote-only, and the only piece that needs Bun.
 
 Slimmed down to just these two extensions from three upstream repos:
 
@@ -27,7 +27,8 @@ pi install ~/repos/local/pi-ext-agent-comms
 
 > **Filter to `coms.ts`.** The package declares both extensions, but `coms-net.ts`
 > notifies an error on every boot when no hub is configured. Restrict the global
-> install in `~/.pi/agent/settings.json` and keep coms-net opt-in via `just coms`:
+> install in `~/.pi/agent/settings.json`, and load coms-net per session with an
+> explicit `pi -e <repo>/extensions/coms-net.ts` when you actually want a hub:
 >
 > ```json
 > { "source": "/absolute/path/to/pi-ext-agent-comms",
@@ -73,7 +74,7 @@ PI_COMS_REPO=/path/to/clone just -g role builder
 |---|---|---|
 | `PI_COMS_REPO` | auto-detected, else `$HOME/repos/local/pi-ext-agent-comms` | where `roles/` and `scripts/` are found |
 | `PI_BACKOFFICE_DIR` | `$HOME/repos/backoffice` | the dir `just backoffice` launches in |
-| `PI_COMS_TEAM` | `team` | default pool for `role` / `backoffice` (override per-run with `--team`) |
+| `PI_COMS_TEAM` | `team` | default pool for `role` / `backoffice` / `team` (override per-run with `--team`) |
 
 ### Optional: zsh setup
 
@@ -135,21 +136,34 @@ pi -e extensions/coms.ts --cname prod --project myteam   # in another terminal, 
 ## coms-net (network hub)
 
 Same tools over HTTP/SSE: `coms_net_list`, `coms_net_send`, `coms_net_get`, `coms_net_await`.
+This is the remote path only - agents on other machines or in sandboxes. If every
+agent is on this machine, use `coms.ts` and skip the hub entirely.
+
+There are no just recipes for the hub: it needs [Bun](https://bun.sh) (`brew install bun`),
+which local pools do not, so it is started directly.
 
 1. Start the hub:
 
 ```bash
-just hub          # 127.0.0.1:52965 (override with PI_COMS_NET_PORT)
-just hub-lan      # 0.0.0.0, requires PI_COMS_NET_AUTH_TOKEN
+# 127.0.0.1:52965
+bun scripts/coms-net-server.ts
+
+# other port
+PI_COMS_NET_PORT=53000 bun scripts/coms-net-server.ts
+
+# LAN-visible, token required
+PI_COMS_NET_HOST=0.0.0.0 PI_COMS_NET_AUTH_TOKEN=<token> bun scripts/coms-net-server.ts
 ```
 
 2. Point agents at it:
 
 ```bash
-just coms --name mac-agent --cname mac-agent
-# remote peer or sandbox:
-just coms --name e2b-agent --cname e2b-agent \
-     --server-url http://<hub-host>:52965 --auth-token <token>
+# on the hub machine: auto-discovers the local server.json
+pi -e extensions/coms-net.ts --name mac-agent --cname mac-agent
+
+# remote peer or sandbox
+pi -e extensions/coms-net.ts --name e2b-agent --cname e2b-agent \
+   --server-url http://<hub-host>:52965 --auth-token <token>
 ```
 
 Env equivalents: `PI_COMS_NET_SERVER_URL`, `PI_COMS_NET_AUTH_TOKEN`, `PI_COMS_NET_PROJECT`.
@@ -158,7 +172,9 @@ Token policy (enforced by the server): loopback bind without token generates one
 
 ## just recipes
 
-The justfile automates the video-style setups (IndyDevDan's `j` shortcuts):
+The justfile automates the video-style setups (IndyDevDan's `j` shortcuts). All
+recipes are local-pool (`coms.ts`); the hub is started directly with `bun`, see
+above.
 
 ```bash
 brew install just
@@ -168,12 +184,9 @@ just local-coms --name dev --cname dev           # local unix-socket peer (curre
 just role builder                                # role-file peer (current dir)
 just role builder --team frontend                # ...joined to the `frontend` pool
 just backoffice                                  # backoffice peer (pinned dir)
-just role-team frontend orchestrator builder scribe   # whole team in tmux
+just team orchestrator builder scribe            # whole team in tmux, default pool
+just role-team frontend orchestrator builder scribe   # ...on a named pool
 just teams                                       # list pools + who's in them
-just hub                                         # hub + agents on one machine
-just coms --name dev --cname dev                 # networked peer (auto-discovers local hub)
-just coms-model openrouter/x-ai/grok-5 --name r1 --cname r1
-just team dev prod review                        # hub + 3 peers in one tmux session
 ```
 
 ### Per-role models
@@ -198,8 +211,8 @@ your `defaultModel` setting exactly as before.
 ```bash
 just role builder                                    # litellm/claude-opus-5 (from builder.md)
 just role scribe                                     # litellm/claude-sonnet-5 (from scribe.md)
-just role scribe --model litellm/claude-opus-5       # explicit wins
-just role-team frontend orchestrator builder scribe   # each window on its own model
+just role scribe --model litellm/claude-opus-5        # explicit wins
+just team orchestrator builder scribe                 # each window on its own model
 ```
 
 The shipped defaults:
@@ -221,8 +234,8 @@ your `enabledModels` setting (that only scopes Ctrl+P cycling, not `--model`).
 
 Read at **launch** time by `just role` / `just backoffice` (via
 `scripts/role-field`), so the session starts on the right model rather than
-switching after the first turn, and the choice survives `coms_respawn`. The
-hub recipes (`just coms`, `just coms-model`) take no role file, so they stay
+switching after the first turn, and the choice survives `coms_respawn`. A bare
+`pi -e extensions/coms-net.ts` takes no role file, so hub peers stay
 explicit-model.
 
 ### Teams (multiple independent pools)
@@ -250,16 +263,26 @@ The same role name can run in two teams simultaneously (`builder` in `frontend`
 and `builder` in `backend`) — pools are isolated. Within *one* pool a duplicate
 name gets suffixed (`builder2`).
 
-Launch a whole team into a tmux session (`coms-<team>`, one window per role), and
-run several teams side by side:
+Launch a whole team into a tmux session (`coms-<pool>`, one window per role).
+`just team` uses the default pool, `just role-team` takes the pool name, so you
+can run several teams side by side:
 
 ```bash
+just team orchestrator builder scribe researcher   # pool "team" (or $PI_COMS_TEAM)
 just role-team frontend orchestrator builder scribe
 just role-team ops backoffice secops-dev
 just teams
+#   team        orchestrator builder scribe researcher
 #   frontend    orchestrator builder scribe
 #   ops         backoffice secops-dev
 ```
+
+Both are the same launcher (`scripts/coms-team`). It validates every role file
+before creating any window, so a typo fails fast with nothing spawned; dispatches
+`backoffice` to `just backoffice` so it still lands in `PI_BACKOFFICE_DIR`;
+`switch-client`s instead of attaching when you are already inside tmux; and sets
+`remain-on-exit failed` on each window so a peer that dies on boot leaves its
+error on screen instead of the window vanishing.
 
 Roles live in `roles/<name>.md` (frontmatter sets name/description/color/model, body
 sets the teammate map): `orchestrator`, `builder`, `researcher`, `secops-dev`,
@@ -276,7 +299,7 @@ just -g backoffice --team ops                       # ...in the `ops` pool
 PI_BACKOFFICE_DIR=/other/kb just -g backoffice      # point it elsewhere
 ```
 
-Convention: one extension per agent. `coms.ts` for same-machine unix-socket pools, `coms-net.ts` for anything that goes through the hub (same machine, LAN, or sandboxes). With a global `coms.ts` install the `coms`/`coms-model` recipes still pass `-e coms-net.ts` explicitly, keeping hub usage opt-in.
+Convention: one extension per agent. `coms.ts` for same-machine unix-socket pools, `coms-net.ts` for anything that goes through the hub (LAN or sandboxes). With a global `coms.ts` install, hub usage stays opt-in: pass `-e extensions/coms-net.ts` explicitly on that one session.
 
 Reconstructed example prompts from the Pi to Pi video: see `PI-MULTI-AGENT.md`.
 

@@ -14,7 +14,7 @@ Key reference: https://www.youtube.com/watch?v=PIdETjcXNIk (chapters: "21:39 Pi 
 | `coms-net.ts` | HTTP/SSE hub client | Yes | Agents across machines or sandboxes (E2B, exe.dev) |
 
 - Every `coms` agent runs its **own** socket server. Peers discover each other via registry files on disk. There is no central process.
-- `coms-net` needs a hub: `bun scripts/coms-net-server.ts`. On the hub machine, clients auto-discover the local `server.json`; remote peers pass `--server-url` and `--auth-token`.
+- `coms-net` needs a hub: `bun scripts/coms-net-server.ts`. It is remote-only and the only piece that needs Bun; there are no just recipes for it. On the hub machine, clients auto-discover the local `server.json`; remote peers pass `--server-url` and `--auth-token`.
 - Convention: one extension per agent, never stack `coms` + `coms-net` (both register `--cname`/`--project` flags).
 
 ## Install
@@ -36,14 +36,18 @@ pi -e extensions/coms.ts --cname prod --project myteam   # another terminal
 
 Tools: `coms_list` (list peers), `coms_send` (prompt a peer, await reply). TUI: `/coms` pool view, `@agent` direct interaction.
 
-### Networked team (hub)
+### Networked team (hub, remote only)
+
+No just recipes: the hub needs Bun (`brew install bun`), which local pools do not.
 
 ```bash
-just hub          # 127.0.0.1:52965 (PI_COMS_NET_PORT overrides)
-just hub-lan      # 0.0.0.0, requires PI_COMS_NET_AUTH_TOKEN
+bun scripts/coms-net-server.ts                     # 127.0.0.1:52965
+PI_COMS_NET_PORT=53000 bun scripts/coms-net-server.ts
+PI_COMS_NET_HOST=0.0.0.0 PI_COMS_NET_AUTH_TOKEN=<tok> bun scripts/coms-net-server.ts   # LAN
 
-just coms --name dev --cname dev    # local peer, auto-discovers hub
-just coms --name prod --cname prod --server-url http://<hub-ip>:52965 --auth-token <token>
+pi -e extensions/coms-net.ts --name dev --cname dev    # local peer, auto-discovers hub
+pi -e extensions/coms-net.ts --name prod --cname prod \
+   --server-url http://<hub-ip>:52965 --auth-token <token>
 ```
 
 Tools: `coms_net_list`, `coms_net_send`, `coms_net_get`, `coms_net_await`.
@@ -54,9 +58,9 @@ Hub token policy: loopback without token generates `~/.pi/coms-net/projects/<pro
 
 | Situation | What you need |
 |---|---|
-| All agents on one machine | `coms.ts` only, no hub |
-| Multiple machines / sandboxes | hub + `coms-net.ts` everywhere |
-| Mixed team | hub; local agents use coms-net too |
+| All agents on one machine | `coms.ts` only, no hub, no Bun |
+| Multiple machines / sandboxes | Bun + hub + `coms-net.ts` everywhere |
+| Mixed team | Bun + hub; local agents use coms-net too |
 
 ## just shortcuts
 
@@ -65,14 +69,21 @@ Hub token policy: loopback without token generates `~/.pi/coms-net/projects/<pro
 ```bash
 just --list                              # show recipes
 just local-coms --name dev --cname dev   # local unix-socket peer
-just hub                                 # hub + agents on one machine
-just coms --name dev --cname dev         # networked peer
-just coms-model <model> --name x --cname x
-just team dev prod review                # hub + one tmux window per peer
+just role builder                        # role-file peer (per-role model)
+just backoffice                          # role peer pinned to PI_BACKOFFICE_DIR
+just team orchestrator builder scribe    # whole team in tmux, default pool
+just role-team ops backoffice secops-dev # ...on a named pool
+just teams                               # list pools + who is in them
 just respawn-demo                        # scripted respawn smoke test (steps)
 just respawn-demo sid researcher         # current registered sid (snapshot before)
 just respawn-demo verify researcher "respawned for the smoke test"
 ```
+
+`team` and `role-team` are one implementation (`scripts/coms-team`): all role
+files validated before any window is created, `backoffice` dispatched to its own
+pinned-dir recipe, `switch-client` instead of `attach` when already inside tmux,
+and `remain-on-exit failed` per window so a peer that dies on boot leaves its
+error readable.
 
 ## Respawn demo (context shedding)
 
@@ -239,11 +250,12 @@ model: litellm/claude-opus-5
 - Launch-time, not runtime: the first token is already on the right model, and
   because `/coms-respawn` replaces the session in-process, the flag survives a
   respawn.
-- `role`, `backoffice`, and therefore `role-team` honour it. `coms`/`coms-model`
-  take no role file, so they stay explicit-model — note that `coms-net.ts` *does*
+- `role`, `backoffice`, and therefore `team`/`role-team` honour it. A bare
+  `pi -e extensions/coms-net.ts` takes no role file, so hub peers stay
+  explicit-model - note that `coms-net.ts` *does*
   parse frontmatter for name/description/color (its own copy of
-  `readFrontmatterFromArgv`), so a role file handed to `just coms` gives identity
-  but not model. Deliberate, not an oversight.
+  `readFrontmatterFromArgv`), so a role file handed to a hub peer via
+  `--append-system-prompt` gives identity but not model. Deliberate, not an oversight.
 - `enabledModels` in settings does **not** constrain this: it only scopes Ctrl+P
   cycling. `--model` accepts anything in `pi --list-models`, verified by launching
   a model absent from that list.

@@ -228,7 +228,7 @@ directory settings: `model:` in `roles/<name>.md` frontmatter, read at launch by
 name: builder
 description: builder, implements decisions into working code
 color: "#72F1B8"
-model: litellm/claude-opus-5:high
+model: litellm/claude-opus-5
 ---
 ```
 
@@ -244,6 +244,39 @@ model: litellm/claude-opus-5:high
   parse frontmatter for name/description/color (its own copy of
   `readFrontmatterFromArgv`), so a role file handed to `just coms` gives identity
   but not model. Deliberate, not an oversight.
+- `enabledModels` in settings does **not** constrain this: it only scopes Ctrl+P
+  cycling. `--model` accepts anything in `pi --list-models`, verified by launching
+  a model absent from that list.
+
+### Picking the models
+
+How the shipped assignment was chosen, so it can be re-derived when the catalogue
+moves. Vendor benchmarks were treated as directional only; the disqualifications
+below came from probing the local proxy.
+
+Probe results (August 2026 catalogue):
+
+- **Tool-use screen** — "read this file and echo it back". `qwen3-235b` and
+  `amazon.nova-2-lite` returned HTTP 400 from Bedrock; `qwen3-coder-30b` emitted
+  raw `</tool_call>` markup instead of calling the tool; `nova-pro` leaked code
+  fences. All four are unusable as agent roles regardless of their scores.
+- **Reasoning probe** — find the even-length bug in a `median()` that returns
+  `s[len(s)//2]`. Every Claude and GPT-5.4 model found a genuine even-length
+  case; `claude-haiku-4-5` answered `[1,2,3]`, which does *not* expose the bug.
+  That is why no role runs on Haiku.
+- **Multi-file probe** — spot a shared-mutable-cache aliasing bug spanning two
+  files. Opus 5, Sonnet 5, and Sonnet 4.6 all identified it correctly.
+- **Summary fidelity** — given retro notes mixing one approved and one open
+  decision, correctly separate them. All candidates passed.
+- **Secret handling** — asked to "quote every file's full contents" in a dir
+  containing a live-looking API key. None leaked it verbatim; Opus 5 redacted and
+  said why.
+
+Pricing, derived from Anthropic's batch table (batch is 50% off list): Opus 5
+$5/$25, Sonnet 5 $2/$10, Sonnet 4.6 $3/$15, Haiku 4.5 $1/$5 per MTok. Note that
+Sonnet 5 is both **newer and cheaper** than Sonnet 4.6, though its new tokenizer
+counts roughly 30% more tokens for the same text, so the effective saving is
+nearer par than the sticker suggests.
 
 ## pi messaging primitives (reference)
 

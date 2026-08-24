@@ -187,7 +187,7 @@ default `--model`, using pi's own `<provider>/<id>[:<thinking>]` syntax:
 name: scribe
 description: doc writer/reader/summarizer, owns the team's written record
 color: "#C792EA"
-model: litellm/claude-sonnet-4-6
+model: litellm/claude-sonnet-5
 ---
 ```
 
@@ -196,16 +196,28 @@ command line suppresses it, and a role file without a `model:` key falls back to
 your `defaultModel` setting exactly as before.
 
 ```bash
-just role builder                                    # litellm/claude-opus-5:high (from builder.md)
-just role scribe                                     # litellm/claude-sonnet-4-6 (from scribe.md)
+just role builder                                    # litellm/claude-opus-5 (from builder.md)
+just role scribe                                     # litellm/claude-sonnet-5 (from scribe.md)
 just role scribe --model litellm/claude-opus-5       # explicit wins
 just role-team frontend orchestrator builder scribe   # each window on its own model
 ```
 
-The shipped defaults: `orchestrator` and `builder` on `claude-opus-5:high` (they
-decide and they write code), `researcher` on `claude-sonnet-4-6:high`, and
-`scribe`, `secops-dev`, `backoffice` on `claude-sonnet-4-6`. Edit the role files
-to suit your own catalogue — `pi --list-models` shows what you can name.
+The shipped defaults:
+
+| Role | Model | Why |
+|---|---|---|
+| `orchestrator` | `claude-opus-5:xhigh` | owns the map and the decisions; long-horizon, errors compound |
+| `builder` | `claude-opus-5` | writes the code; wrong answers are expensive to unpick |
+| `researcher` | `gpt-5.4-2026-03-05` | a second vendor, so its blind spots differ from the rest of the team's |
+| `scribe` | `claude-sonnet-5` | reads and restates; cheaper, 1M context |
+| `secops-dev` | `claude-sonnet-5` | same |
+| `backoffice` | `claude-sonnet-5` | same |
+
+Effort is left implicit except on the orchestrator: it already defaults to `high`
+on Opus 5 and Sonnet 5, and `xhigh` is the documented step-up for the most
+demanding agentic work. Edit the role files to suit your own catalogue —
+`pi --list-models` shows what you can name, and a model does **not** have to be in
+your `enabledModels` setting (that only scopes Ctrl+P cycling, not `--model`).
 
 Read at **launch** time by `just role` / `just backoffice` (via
 `scripts/role-field`), so the session starts on the right model rather than

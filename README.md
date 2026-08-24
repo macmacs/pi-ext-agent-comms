@@ -77,6 +77,26 @@ PI_COMS_REPO=/path/to/clone just -g role builder
 | `PI_COMS_TEAM` | `team` | default pool for `role` / `backoffice` / `team` (override per-run with `--team`) |
 | `PI_COMS_MAIN_PANE_WIDTH` | `60%` | width of the main (first role) pane in a tiled `team` / `role-team` |
 | `PI_COMS_CACHE_TTL_MS` | `300000` (5 min) | prompt-cache TTL used for the idle / `cache cold` marker in `coms_list` |
+| `PI_COMS_DIR` | `$HOME/.pi/coms` | root of the registry (`projects/<pool>/agents/*.json`) |
+| `PI_COMS_MAX_HOPS` | `5` | hop limit per message; beyond it the receiver nacks with `hops exceeded` |
+| `PI_COMS_PING_INTERVAL_MS` | `10000` (10s) | keepalive / cascade-ping period; peers are evicted as stale after 3 missed cycles |
+
+Pointing `PI_COMS_DIR` somewhere else gives you a completely separate registry,
+which is the clean way to try things out without touching a live pool. It is read
+by `coms.ts`, by `scripts/agent-picker` and by `just teams`, so export it for the
+whole shell rather than per command:
+
+```bash
+export PI_COMS_DIR=/tmp/coms-scratch
+just role builder    # registers in the scratch registry, invisible to the real pool
+```
+
+Two more variables show up in a coms process but are not knobs. `PI_COMS_PROJECT`
+and `PI_COMS_NAME` are *written* by the extension at boot so co-loaded extensions
+can read the identity and so `/reload` reuses the same name instead of drawing a
+new one. `PI_PARENT_SESSION` is only ever read (`IS_ROOT = !PI_PARENT_SESSION`,
+gating the cascade ping); nothing in this repo or in pi sets it today, so every
+coms agent currently counts as root.
 
 ### Optional: zsh setup
 
@@ -248,6 +268,7 @@ just team orchestrator builder scribe            # whole team tiled in one windo
 just team --windows orchestrator builder         # ...one window per role instead
 just role-team frontend orchestrator builder scribe   # ...on a named pool
 just teams                                       # list pools + who's in them
+just respawn-demo                                # scripted respawn smoke test (prints steps)
 ```
 
 ### Per-role models

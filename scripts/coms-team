@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Launch a set of role peers into one tmux session, one window per role.
+#
+#   scripts/coms-team --repo <repo> --pool <name> --dir <launch-dir> <role>...
+#
+# The single implementation behind both `just team` (default pool) and
+# `just role-team <pool>` (explicit pool). Session is named coms-<pool>, so
+# several pools can run side by side.
+#
+# Why the args are explicit rather than derived:
+#   --repo  the justfile resolves it (PI_COMS_REPO / justfile_directory() /
+#           $HOME fallback for `just -g`); re-deriving it here would diverge.
+#   --dir   shebang recipes run with pwd = justfile dir, not the dir the user
+#           invoked just in. Peers must launch in the user's dir to inherit that
+#           project's .pi/ extensions, AGENTS.md, and RAG index, so the justfile
+#           passes invocation_directory() through and we hand it to tmux as the
+#           window start-directory.
+set -euo pipefail
+
+repo="" pool="" dir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo) shift; [ $# -gt 0 ] || { echo "coms-team: --repo needs a value" >&2; exit 1; }; repo="$1" ;;
+    --pool) shift; [ $# -gt 0 ] || { echo "coms-team: --pool needs a value" >&2; exit 1; }; pool="$1" ;;
+    --dir)  shift; [ $# -gt 0 ] || { echo "coms-team: --dir needs a value" >&2; exit 1; }; dir="$1" ;;
+    --)     shift; break ;;
+    -*)     echo "coms-team: unknown flag $1" >&2; exit 1 ;;
+    *)      break ;;
+  esac
+  shift
+done
+
+test -n "$repo" || { echo "coms-team: --repo is required" >&2; exit 1; }
+test -n "$pool" || { echo "coms-team: --pool must not be empty" >&2; exit 1; }
+test -d "$repo/roles" || { echo "coms-team: no roles/ under $repo (set PI_COMS_REPO)" >&2; exit 1; }
+[ $# -gt 0 ] || { echo "coms-team: name at least one role" >&2; exit 1; }
+# Empty --dir (or a dir that has since gone away) falls back to $HOME rather than
+# letting tmux inherit some unrelated cwd.
+if [ -z "$dir" ] || [ ! -d "$dir" ]; then dir="$HOME"; fi
+
+# Validate every role up front and name every missing file, so a typo'd team
+# fails before any window exists instead of spawning broken peers.
+missing=()
+for r in "$@"; do
+  [ -f "$repo/roles/$r.md" ] || missing+=("$repo/roles/$r.md")
+done
+if [ ${#missing[@]} -gt 0 ]; then
+  echo "coms-team: role file not found:" >&2
+  for m in "${missing[@]}"; do echo "  $m" >&2; done
+  avail=""
+  for f in "$repo/roles"/*.md; do
+    [ -e "$f" ] || continue
+    n="${f##*/}"; avail="$avail ${n%.md}"
+  done
+  echo "available:$avail" >&2
+  exit 1
+fi
+
+# backoffice has its own recipe: it pins the launch dir to PI_BACKOFFICE_DIR so
+# it picks up that dir's local RAG extension and AGENTS.md. Routing it through
+# `just role` would silently launch it in the invocation dir instead.
+launch_cmd() {
+  local role="$1"
+  if [ "$role" = backoffice ]; then
+    printf 'just -f %q backoffice --team %q' "$repo/justfile" "$pool"
+  else
+    printf 'just -f %q role %q --team %q' "$repo/justfile" "$role" "$pool"
+  fi
+}
+
+sess="coms-$pool"
+tmux kill-session -t "$sess" 2>/dev/null || true
+
+first_window=""
+for r in "$@"; do
+  cmd="$(launch_cmd "$r")"
+  # Windows are created empty, configured, then respawned with the real command.
+  # Passing the command to new-window directly races: a peer that dies during
+  # boot can exit before set-option lands, and the window closes anyway.
+  if [ -z "$first_window" ]; then
+    # -P -F captures the real window id: base-index is user config, so "$sess:1"
+    # is not reliably the first window.
+    first_window="$(tmux new-session -d -s "$sess" -n "$r" -c "$dir" -P -F '#{window_id}')"
+    win="$first_window"
+  else
+    win="$(tmux new-window -t "$sess" -n "$r" -c "$dir" -P -F '#{window_id}')"
+  fi
+  # remain-on-exit is a window option with no session-level inheritance, and a
+  # global (-g) set would leak into the user's other tmux windows. `failed`
+  # keeps only crashed panes around, so a peer that dies on boot leaves its
+  # error readable instead of the window vanishing.
+  tmux set-option -w -t "$win" remain-on-exit failed
+  tmux respawn-window -k -t "$win" "$cmd"
+done
+
+tmux select-window -t "$first_window"
+
+# Nesting tmux inside tmux errors with "sessions should be nested with care";
+# from inside a client, switch to the new session instead of attaching. The
+# fallback covers TMUX being set with no attached client (a send-keys shell),
+# where switch-client has no client to move.
+if [ -n "${TMUX:-}" ] && tmux switch-client -t "$sess" 2>/dev/null; then
+  :
+elif ! tmux attach -t "$sess" 2>/dev/null; then
+  echo "coms-team: session $sess is running; attach with: tmux attach -t $sess" >&2
+fi

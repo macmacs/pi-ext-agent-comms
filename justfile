@@ -26,8 +26,9 @@ default:
 
 # Install coms globally (auto-loads in every session) + wire `just -g` from anywhere.
 # Filters the package to coms.ts only: coms-net.ts errors on boot without a hub,
-# so it stays opt-in via `just coms` / `just hub`.
+# so it stays opt-in via an explicit `pi -e {{repo}}/extensions/coms-net.ts`.
 #   just install-global
+[doc("Install coms globally + symlink the justfile for `just -g` from anywhere")]
 install-global:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -46,6 +47,7 @@ install-global:
 
 # Local peer in the CURRENT directory:
 #   just local-coms --name dev --cname dev --color "#72F1B8"
+[doc("Plain local peer in the current dir (args go straight to pi)")]
 local-coms *args:
     cd "{{here}}" && pi {{args}}
 
@@ -57,6 +59,7 @@ local-coms *args:
 #   just role orchestrator   # or: builder / researcher / secops-dev / scribe
 #   just role builder --team frontend
 #   just role builder --team frontend --model openrouter/x-ai/grok-5
+[doc("Role-file peer from roles/<name>.md in the current dir")]
 role name *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -91,6 +94,7 @@ role name *args:
 #   just backoffice
 #   just backoffice --team frontend
 #   PI_BACKOFFICE_DIR=/other/path just backoffice
+[doc("Backoffice peer, always pinned to PI_BACKOFFICE_DIR")]
 backoffice *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -121,6 +125,7 @@ backoffice *args:
 
 # List coms pools (teams) and who is registered in each.
 #   just teams
+[doc("List coms pools and who is registered in each")]
 teams:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -141,76 +146,35 @@ teams:
     done
     [ "$found" = 1 ] || echo "no agents registered under $root"
 
-# ---------------------- coms-net (HTTP/SSE hub) ------------------------------
-
-# Hub on 127.0.0.1 (kills any stale process on the pinned port first)
-hub:
-    -lsof -ti :${PI_COMS_NET_PORT:-52965} | xargs -r kill -TERM 2>/dev/null
-    PI_COMS_NET_PORT=${PI_COMS_NET_PORT:-52965} bun "{{repo}}/scripts/coms-net-server.ts"
-
-# Hub on LAN, 0.0.0.0 (requires PI_COMS_NET_AUTH_TOKEN)
-hub-lan:
-    -lsof -ti :${PI_COMS_NET_PORT:-52965} | xargs -r kill -TERM 2>/dev/null
-    PI_COMS_NET_HOST=0.0.0.0 PI_COMS_NET_PORT=${PI_COMS_NET_PORT:-52965} bun "{{repo}}/scripts/coms-net-server.ts"
-
-# Networked peer in the CURRENT directory. On the hub machine it auto-discovers
-# the local server.json:
-#   just coms --name dev --cname dev
-# Remote peer or sandbox:
-#   just coms --name prod --cname prod --server-url http://<host>:52965 --auth-token <tok>
-coms *args:
-    cd "{{here}}" && pi -e "{{repo}}/extensions/coms-net.ts" {{args}}
-
-# Peer pinned to a model:
-#   just coms-model openrouter/anthropic/claude-sonnet-4-5 --name dev --cname dev
-coms-model model *args:
-    cd "{{here}}" && pi -e "{{repo}}/extensions/coms-net.ts" --model {{model}} {{args}}
-
 # ---------------------- respawn demo -------------------------------------------
 
 # Scripted respawn smoke test between two role-file peers (orchestrator + researcher).
 #   just respawn-demo                          # print the scripted steps
 #   just respawn-demo sid researcher           # current registered session id (snapshot before)
 #   just respawn-demo verify researcher "respawned for the smoke test"
+[doc("Scripted respawn smoke test between two role peers")]
 respawn-demo *args="":
     "{{repo}}/scripts/respawn-demo.sh" {{args}}
 
 # ---------------------- tmux team --------------------------------------------
+# Both recipes are the same launcher (scripts/coms-team): one tmux window per
+# role, backoffice dispatched to its own pinned-dir recipe, all role files
+# validated before any window is created. They differ only in which pool they
+# join. Peers launch in your CURRENT directory, so `here` is passed explicitly
+# (shebang/script pwd is the justfile dir, not yours).
 
-# Flat coms-net team in one tmux session: hub window + one window per peer.
-# (Hub-based; for local role peers sharing a pool see `role-team`.)
-#   just team dev prod review
-team +names:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    tmux kill-session -t coms-team 2>/dev/null || true
-    tmux new-session -d -s coms-team -n hub "PI_COMS_NET_PORT=${PI_COMS_NET_PORT:-52965} bun '{{repo}}/scripts/coms-net-server.ts'"
-    for n in {{names}}; do
-        tmux new-window -t coms-team -n "$n" "just -f '{{repo}}/justfile' coms --name $n --cname $n"
-    done
-    tmux attach -t coms-team
+# Whole team in one tmux session on the DEFAULT pool ({{team_default}}).
+# Session coms-{{team_default}}, one window per role, per-role models from
+# roles/<name>.md frontmatter.
+#   just team orchestrator builder scribe researcher
+[doc("Launch roles as a tmux team on the default pool: just team orchestrator builder scribe")]
+team +roles:
+    @"{{repo}}/scripts/coms-team" --repo "{{repo}}" --pool "{{team_default}}" --dir "{{here}}" {{roles}}
 
-# Local role peers sharing one pool, one tmux window each (no hub needed).
-# Session is named coms-<team>, so several teams can run side by side.
+# Same, on an explicitly named pool - run several teams side by side.
+# Session coms-<team_name>.
 #   just role-team frontend orchestrator builder scribe
 #   just role-team ops backoffice secops-dev
+[doc("Launch roles as a tmux team on a named pool: just role-team ops backoffice secops-dev")]
 role-team team_name +roles:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    sess="coms-{{team_name}}"
-    for r in {{roles}}; do
-      test -f "{{repo}}/roles/$r.md" || { echo "role file {{repo}}/roles/$r.md not found" >&2; exit 1; }
-    done
-    tmux kill-session -t "$sess" 2>/dev/null || true
-    first=1
-    for r in {{roles}}; do
-      if [ "$first" = 1 ]; then
-        tmux new-session -d -s "$sess" -n "$r" \
-          "just -f '{{repo}}/justfile' role $r --team {{team_name}}"
-        first=0
-      else
-        tmux new-window -t "$sess" -n "$r" \
-          "just -f '{{repo}}/justfile' role $r --team {{team_name}}"
-      fi
-    done
-    tmux attach -t "$sess"
+    @"{{repo}}/scripts/coms-team" --repo "{{repo}}" --pool "{{team_name}}" --dir "{{here}}" {{roles}}

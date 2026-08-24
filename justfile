@@ -157,17 +157,21 @@ respawn-demo *args="":
     "{{repo}}/scripts/respawn-demo.sh" {{args}}
 
 # ---------------------- tmux team --------------------------------------------
-# Both recipes are the same launcher (scripts/coms-team): one tmux window per
-# role, backoffice dispatched to its own pinned-dir recipe, all role files
-# validated before any window is created. They differ only in which pool they
-# join. Peers launch in your CURRENT directory, so `here` is passed explicitly
-# (shebang/script pwd is the justfile dir, not yours).
+# Both recipes are the same launcher (scripts/coms-team): one window with one
+# main-vertical pane per role (first role gets the big left pane), backoffice
+# dispatched to its own pinned-dir recipe, all role files validated before
+# anything is created. Pass --windows for one window per role instead. They
+# differ only in which pool they join. Peers launch in your CURRENT directory,
+# so `here` is passed explicitly (shebang/script pwd is the justfile dir, not
+# yours).
 
-# Whole team in one tmux session on the DEFAULT pool ({{team_default}}).
-# Session coms-{{team_default}}, one window per role, per-role models from
-# roles/<name>.md frontmatter.
+# Whole team tiled in one tmux window on the DEFAULT pool ({{team_default}}).
+# Session coms-{{team_default}}, one pane per role, per-role models from
+# roles/<name>.md frontmatter. Pane borders carry the role names; prefix-z
+# zooms one agent to fullscreen.
 #   just team orchestrator builder scribe researcher
-[doc("Launch roles as a tmux team on the default pool: just team orchestrator builder scribe")]
+#   just team --windows orchestrator builder
+[doc("Tile roles in one tmux window on the default pool (--windows for one window each)")]
 team +roles:
     @"{{repo}}/scripts/coms-team" --repo "{{repo}}" --pool "{{team_default}}" --dir "{{here}}" {{roles}}
 
@@ -175,6 +179,7 @@ team +roles:
 # Session coms-<team_name>.
 #   just role-team frontend orchestrator builder scribe
 #   just role-team ops backoffice secops-dev
-[doc("Launch roles as a tmux team on a named pool: just role-team ops backoffice secops-dev")]
+#   just role-team ops --windows backoffice secops-dev
+[doc("Tile roles in one tmux window on a named pool (--windows for one window each)")]
 role-team team_name +roles:
     @"{{repo}}/scripts/coms-team" --repo "{{repo}}" --pool "{{team_name}}" --dir "{{here}}" {{roles}}

@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # Launch a set of role peers into one tmux session, one window per role.
 #
-#   scripts/coms-team --repo <repo> --pool <name> --dir <launch-dir> <role>...
+#   scripts/coms-team --repo <repo> --pool <name> --dir <launch-dir> [--windows] <role>...
 #
 # The single implementation behind both `just team` (default pool) and
 # `just role-team <pool>` (explicit pool). Session is named coms-<pool>, so
 # several pools can run side by side.
+#
+# Default layout is tiled: all roles in ONE window as main-vertical panes, the
+# first role named getting the big left pane. `--windows` gives one window per
+# role instead.
 #
 # Why the args are explicit rather than derived:
 #   --repo  the justfile resolves it (PI_COMS_REPO / justfile_directory() /
@@ -17,18 +21,29 @@
 #           window start-directory.
 set -euo pipefail
 
-repo="" pool="" dir=""
+# Fraction of the window width given to the main pane in tiled mode. A
+# percentage, not a column count, so it adapts to the window size.
+main_width="${PI_COMS_MAIN_PANE_WIDTH:-60%}"
+
+repo="" pool="" dir="" layout=tiled
+roles=()
+# Roles arrive through just's `+roles` variadic, so a mode flag the user wrote
+# lands anywhere in the list. Scan the whole argv rather than stopping at the
+# first non-flag, so `--windows` works before, among, or after the role names.
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) shift; [ $# -gt 0 ] || { echo "coms-team: --repo needs a value" >&2; exit 1; }; repo="$1" ;;
     --pool) shift; [ $# -gt 0 ] || { echo "coms-team: --pool needs a value" >&2; exit 1; }; pool="$1" ;;
     --dir)  shift; [ $# -gt 0 ] || { echo "coms-team: --dir needs a value" >&2; exit 1; }; dir="$1" ;;
-    --)     shift; break ;;
+    --windows) layout=windows ;;
+    --tiled)   layout=tiled ;;
+    --)     shift; while [ $# -gt 0 ]; do roles+=("$1"); shift; done; break ;;
     -*)     echo "coms-team: unknown flag $1" >&2; exit 1 ;;
-    *)      break ;;
+    *)      roles+=("$1") ;;
   esac
   shift
 done
+set -- ${roles[@]+"${roles[@]}"}
 
 test -n "$repo" || { echo "coms-team: --repo is required" >&2; exit 1; }
 test -n "$pool" || { echo "coms-team: --pool must not be empty" >&2; exit 1; }
@@ -68,32 +83,122 @@ launch_cmd() {
   fi
 }
 
+# Kept intact because the tiled path shifts "$@" while splitting and still needs
+# the full ordered list to pair roles with pane ids afterwards.
+all_roles=("$@")
+
 sess="coms-$pool"
 tmux kill-session -t "$sess" 2>/dev/null || true
 
-first_window=""
-for r in "$@"; do
-  cmd="$(launch_cmd "$r")"
-  # Windows are created empty, configured, then respawned with the real command.
-  # Passing the command to new-window directly races: a peer that dies during
-  # boot can exit before set-option lands, and the window closes anyway.
-  if [ -z "$first_window" ]; then
-    # -P -F captures the real window id: base-index is user config, so "$sess:1"
-    # is not reliably the first window.
-    first_window="$(tmux new-session -d -s "$sess" -n "$r" -c "$dir" -P -F '#{window_id}')"
-    win="$first_window"
-  else
-    win="$(tmux new-window -t "$sess" -n "$r" -c "$dir" -P -F '#{window_id}')"
+if [ "$layout" = tiled ]; then
+  # A detached `new-session -d` is created at `default-size` (80x24), and tmux
+  # scales an existing layout PROPORTIONALLY when a client of a different size
+  # attaches. main-pane-width 60% resolved at 80 cols and then scaled to 240 is
+  # 127, not the 143 the user asked for. So create the session at the real
+  # terminal size up front and the percentage resolves once, correctly.
+  # Size is read from the controlling terminal explicitly: `tput cols` inspects
+  # stdout, which is redirected whenever this script is called from a pipeline,
+  # and then reports the 80-column default instead of the real width.
+  size=()
+  tty_dev="$(tty 2>/dev/null || true)"
+  [ -c "${tty_dev:-}" ] || tty_dev=/dev/tty
+  if term_size=$(stty size <"$tty_dev" 2>/dev/null); then
+    term_lines="${term_size%% *}"
+    term_cols="${term_size##* }"
+    if [ "${term_cols:-0}" -gt 0 ] 2>/dev/null && [ "${term_lines:-0}" -gt 0 ] 2>/dev/null; then
+      size=(-x "$term_cols" -y "$term_lines")
+    fi
   fi
-  # remain-on-exit is a window option with no session-level inheritance, and a
-  # global (-g) set would leak into the user's other tmux windows. `failed`
-  # keeps only crashed panes around, so a peer that dies on boot leaves its
-  # error readable instead of the window vanishing.
-  tmux set-option -w -t "$win" remain-on-exit failed
-  tmux respawn-window -k -t "$win" "$cmd"
-done
 
-tmux select-window -t "$first_window"
+  # One window, one pane per role, main-vertical: first role gets the big left
+  # pane. The window is named after the first role only as a session label; the
+  # per-pane identity comes from the pane titles set below, since in tiled mode
+  # the window name can no longer tell the panes apart.
+  win="$(tmux new-session -d -s "$sess" -n "$1" -c "$dir" ${size[@]+"${size[@]}"} -P -F '#{window_id}')"
+  # Set once on the window: remain-on-exit is a window option and covers every
+  # pane in it. `failed` keeps only crashed panes, so a peer that dies on boot
+  # leaves its error readable instead of the pane vanishing.
+  tmux set-option -w -t "$win" remain-on-exit failed
+  tmux set-option -w -t "$win" main-pane-width "$main_width"
+  tmux set-option -w -t "$win" pane-border-status top
+  tmux set-option -w -t "$win" pane-border-format ' #{pane_title} '
+
+  # Panes are created empty and respawned with the real command, same reason as
+  # the window case: a peer that dies during boot can exit before set-option
+  # lands, and the pane closes anyway.
+  panes=("$(tmux list-panes -t "$win" -F '#{pane_id}')")
+  shift
+  for _ in "$@"; do
+    panes+=("$(tmux split-window -t "$win" -c "$dir" -P -F '#{pane_id}')")
+    # Re-layout after every split: without it tmux halves the pane it split
+    # from, and the main-vertical shape only appears once asked for.
+    tmux select-layout -t "$win" main-vertical
+  done
+
+  i=0
+  for r in "${all_roles[@]}"; do
+    pane="${panes[$i]}"
+    # pi sets its own pane title via an OSC escape ("pi - <project>"), which
+    # overwrites the role label and leaves every border reading the same thing.
+    # allow-set-title is a PANE option and survives respawn-pane, so refuse the
+    # escape first, then set the title we want.
+    tmux set-option -p -t "$pane" allow-set-title off
+    # Titles are set before the respawn deliberately: they survive respawn-pane,
+    # so the border label stays correct even for a pane that later dies.
+    tmux select-pane -t "$pane" -T "$r"
+    tmux respawn-pane -k -t "$pane" "$(launch_cmd "$r")"
+    i=$((i + 1))
+  done
+  # respawn-pane can perturb sizes, so assert the layout once more at the end.
+  tmux select-layout -t "$win" main-vertical
+  tmux select-pane -t "${panes[0]}"
+  # Belt and braces for the size question above: if the terminal size was not
+  # detectable (no tty), the layout was built at 80x24 and will have been scaled
+  # by the time a client attaches. A one-shot hook re-resolves the percentage
+  # against the real client, then removes itself so it never fires again.
+  #
+  # client-resized, NOT client-attached: measured on tmux 3.7b with a real 240col
+  # client attaching to an 80col session, main-pane-width 60%, three panes.
+  # client-attached fires too early - before the client's size is applied to the
+  # window - so the re-layout resolves against the old 80 cols and the result is
+  # then scaled anyway: 127 cols, identical to having no hook at all. client-resized
+  # fires after the size lands and yields the intended 143.
+  #
+  # The hook removes itself after firing once. Keeping it armed also works and
+  # re-asserts main-vertical on later resizes, but it then overwrites any manual
+  # pane adjustment: dragging the divider to 90 cols and later resizing the
+  # terminal snaps it back to 143, every time, with no way to opt out. Removing it
+  # also makes this fallback converge on the normal (tty) path, which sets no hook
+  # at all - so the two paths differ only until the first attach, not forever.
+  if [ ${#size[@]} -eq 0 ]; then
+    tmux set-hook -t "$sess" client-resized \
+      "select-layout -t $win main-vertical ; set-hook -ut $sess client-resized"
+  fi
+else
+  first_window=""
+  for r in "$@"; do
+    cmd="$(launch_cmd "$r")"
+    # Windows are created empty, configured, then respawned with the real command.
+    # Passing the command to new-window directly races: a peer that dies during
+    # boot can exit before set-option lands, and the window closes anyway.
+    if [ -z "$first_window" ]; then
+      # -P -F captures the real window id: base-index is user config, so "$sess:1"
+      # is not reliably the first window.
+      first_window="$(tmux new-session -d -s "$sess" -n "$r" -c "$dir" -P -F '#{window_id}')"
+      win="$first_window"
+    else
+      win="$(tmux new-window -t "$sess" -n "$r" -c "$dir" -P -F '#{window_id}')"
+    fi
+    # remain-on-exit is a window option with no session-level inheritance, and a
+    # global (-g) set would leak into the user's other tmux windows. `failed`
+    # keeps only crashed panes around, so a peer that dies on boot leaves its
+    # error readable instead of the window vanishing.
+    tmux set-option -w -t "$win" remain-on-exit failed
+    tmux respawn-window -k -t "$win" "$cmd"
+  done
+
+  tmux select-window -t "$first_window"
+fi
 
 # Nesting tmux inside tmux errors with "sessions should be nested with care";
 # from inside a client, switch to the new session instead of attaching. The

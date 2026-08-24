@@ -1,4 +1,6 @@
 set dotenv-load := true
+# Lets shebang recipes read their args as "$@" so we can parse flags like --team.
+set positional-arguments
 
 # Repo root (where roles/ and scripts/ live). Resolved dynamically, no username
 # baked in: justfile_directory() is correct when you run in/under the repo, but
@@ -12,6 +14,10 @@ here := invocation_directory()
 # Where the backoffice knowledge base lives (its own .pi/ RAG extension +
 # AGENTS.md). $HOME-relative; override with PI_BACKOFFICE_DIR if you move it.
 backoffice_dir := env_var_or_default("PI_BACKOFFICE_DIR", home_directory() / "repos/backoffice")
+# Default coms pool every peer joins. This is the shared discovery pool: agents
+# only see each other if they share it. Override per-run with `--team <name>` or
+# globally with PI_COMS_TEAM to run several independent teams side by side.
+team_default := env_var_or_default("PI_COMS_TEAM", "team")
 
 default:
     @just --list
@@ -44,29 +50,80 @@ local-coms *args:
     cd "{{here}}" && pi {{args}}
 
 # Role-file peer (identity from roles/<name>.md; replays across respawn).
-# Launches in the CURRENT directory, so it inherits that project's .pi/ setup:
+# Launches in the CURRENT directory, so it inherits that project's .pi/ setup.
+# Joins the default pool unless you pass --team; any other args go through to pi:
 #   just role orchestrator   # or: builder / researcher / secops-dev / scribe
-role name:
+#   just role builder --team frontend
+#   just role builder --team frontend --model openrouter/x-ai/grok-5
+role name *args:
     #!/usr/bin/env bash
     set -euo pipefail
     role_file="{{repo}}/roles/{{name}}.md"
     test -f "$role_file" || { echo "role file $role_file not found" >&2; exit 1; }
+    shift                      # drop the role name; leaves only pass-through args
+    team="{{team_default}}"
+    rest=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --team)   shift; [ $# -gt 0 ] || { echo "--team needs a value" >&2; exit 1; }; team="$1" ;;
+        --team=*) team="${1#--team=}" ;;
+        *)        rest+=("$1") ;;
+      esac
+      shift
+    done
+    test -n "$team" || { echo "--team value must not be empty" >&2; exit 1; }
     cd "{{here}}"
-    exec pi --cname {{name}} --append-system-prompt "$role_file" --project team
+    exec pi --cname {{name}} --append-system-prompt "$role_file" \
+            --project "$team" ${rest[@]+"${rest[@]}"}
 
 # Backoffice peer: pinned to the backoffice dir (its local RAG extension +
 # AGENTS.md) with the backoffice role identity replayed across respawn.
 # Always lands there regardless of where you invoke it from.
 #   just backoffice
+#   just backoffice --team frontend
 #   PI_BACKOFFICE_DIR=/other/path just backoffice
-backoffice:
+backoffice *args:
     #!/usr/bin/env bash
     set -euo pipefail
     role_file="{{repo}}/roles/backoffice.md"
     test -f "$role_file" || { echo "role file $role_file not found" >&2; exit 1; }
     test -d "{{backoffice_dir}}" || { echo "backoffice dir {{backoffice_dir}} not found (set PI_BACKOFFICE_DIR)" >&2; exit 1; }
+    team="{{team_default}}"
+    rest=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --team)   shift; [ $# -gt 0 ] || { echo "--team needs a value" >&2; exit 1; }; team="$1" ;;
+        --team=*) team="${1#--team=}" ;;
+        *)        rest+=("$1") ;;
+      esac
+      shift
+    done
+    test -n "$team" || { echo "--team value must not be empty" >&2; exit 1; }
     cd "{{backoffice_dir}}"
-    exec pi --cname backoffice --append-system-prompt "$role_file" --project team
+    exec pi --cname backoffice --append-system-prompt "$role_file" \
+            --project "$team" ${rest[@]+"${rest[@]}"}
+
+# List coms pools (teams) and who is registered in each.
+#   just teams
+teams:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="${PI_COMS_DIR:-$HOME/.pi/coms}/projects"
+    test -d "$root" || { echo "no pools yet ($root)"; exit 0; }
+    found=0
+    for d in "$root"/*/; do
+      [ -d "$d/agents" ] || continue
+      p="$(basename "$d")"
+      names=""
+      for f in "$d/agents"/*.json; do
+        [ -e "$f" ] || continue
+        names="$names $(basename "$f" .json)"
+      done
+      [ -n "$names" ] || continue
+      found=1
+      printf "%-22s%s\n" "$p" "$names"
+    done
+    [ "$found" = 1 ] || echo "no agents registered under $root"
 
 # ---------------------- coms-net (HTTP/SSE hub) ------------------------------
 
@@ -104,7 +161,8 @@ respawn-demo *args="":
 
 # ---------------------- tmux team --------------------------------------------
 
-# Flat team in one tmux session: hub window + one window per peer.
+# Flat coms-net team in one tmux session: hub window + one window per peer.
+# (Hub-based; for local role peers sharing a pool see `role-team`.)
 #   just team dev prod review
 team +names:
     #!/usr/bin/env bash
@@ -115,3 +173,28 @@ team +names:
         tmux new-window -t coms-team -n "$n" "just -f '{{repo}}/justfile' coms --name $n --cname $n"
     done
     tmux attach -t coms-team
+
+# Local role peers sharing one pool, one tmux window each (no hub needed).
+# Session is named coms-<team>, so several teams can run side by side.
+#   just role-team frontend orchestrator builder scribe
+#   just role-team ops backoffice secops-dev
+role-team team_name +roles:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sess="coms-{{team_name}}"
+    for r in {{roles}}; do
+      test -f "{{repo}}/roles/$r.md" || { echo "role file {{repo}}/roles/$r.md not found" >&2; exit 1; }
+    done
+    tmux kill-session -t "$sess" 2>/dev/null || true
+    first=1
+    for r in {{roles}}; do
+      if [ "$first" = 1 ]; then
+        tmux new-session -d -s "$sess" -n "$r" \
+          "just -f '{{repo}}/justfile' role $r --team {{team_name}}"
+        first=0
+      else
+        tmux new-window -t "$sess" -n "$r" \
+          "just -f '{{repo}}/justfile' role $r --team {{team_name}}"
+      fi
+    done
+    tmux attach -t "$sess"

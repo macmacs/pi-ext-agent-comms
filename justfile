@@ -51,7 +51,9 @@ local-coms *args:
 
 # Role-file peer (identity from roles/<name>.md; replays across respawn).
 # Launches in the CURRENT directory, so it inherits that project's .pi/ setup.
-# Joins the default pool unless you pass --team; any other args go through to pi:
+# Joins the default pool unless you pass --team; any other args go through to pi.
+# A `model:` key in the role file's frontmatter becomes the default --model
+# (pi's `<provider>/<id>[:<thinking>]` syntax); an explicit --model still wins:
 #   just role orchestrator   # or: builder / researcher / secops-dev / scribe
 #   just role builder --team frontend
 #   just role builder --team frontend --model openrouter/x-ai/grok-5
@@ -63,18 +65,25 @@ role name *args:
     shift                      # drop the role name; leaves only pass-through args
     team="{{team_default}}"
     rest=()
+    has_model=0
     while [ $# -gt 0 ]; do
       case "$1" in
         --team)   shift; [ $# -gt 0 ] || { echo "--team needs a value" >&2; exit 1; }; team="$1" ;;
         --team=*) team="${1#--team=}" ;;
+        --model|--model=*|--provider|--provider=*)
+                  has_model=1; rest+=("$1") ;;
         *)        rest+=("$1") ;;
       esac
       shift
     done
     test -n "$team" || { echo "--team value must not be empty" >&2; exit 1; }
+    model=""
+    if [ "$has_model" = 0 ]; then
+      model="$("{{repo}}/scripts/role-field" "$role_file" model)"
+    fi
     cd "{{here}}"
     exec pi --cname {{name}} --append-system-prompt "$role_file" \
-            --project "$team" ${rest[@]+"${rest[@]}"}
+            --project "$team" ${model:+--model "$model"} ${rest[@]+"${rest[@]}"}
 
 # Backoffice peer: pinned to the backoffice dir (its local RAG extension +
 # AGENTS.md) with the backoffice role identity replayed across respawn.
@@ -90,18 +99,25 @@ backoffice *args:
     test -d "{{backoffice_dir}}" || { echo "backoffice dir {{backoffice_dir}} not found (set PI_BACKOFFICE_DIR)" >&2; exit 1; }
     team="{{team_default}}"
     rest=()
+    has_model=0
     while [ $# -gt 0 ]; do
       case "$1" in
         --team)   shift; [ $# -gt 0 ] || { echo "--team needs a value" >&2; exit 1; }; team="$1" ;;
         --team=*) team="${1#--team=}" ;;
+        --model|--model=*|--provider|--provider=*)
+                  has_model=1; rest+=("$1") ;;
         *)        rest+=("$1") ;;
       esac
       shift
     done
     test -n "$team" || { echo "--team value must not be empty" >&2; exit 1; }
+    model=""
+    if [ "$has_model" = 0 ]; then
+      model="$("{{repo}}/scripts/role-field" "$role_file" model)"
+    fi
     cd "{{backoffice_dir}}"
     exec pi --cname backoffice --append-system-prompt "$role_file" \
-            --project "$team" ${rest[@]+"${rest[@]}"}
+            --project "$team" ${model:+--model "$model"} ${rest[@]+"${rest[@]}"}
 
 # List coms pools (teams) and who is registered in each.
 #   just teams

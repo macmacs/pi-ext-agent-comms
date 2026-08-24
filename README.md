@@ -75,6 +75,7 @@ PI_COMS_REPO=/path/to/clone just -g role builder
 | `PI_COMS_REPO` | auto-detected, else `$HOME/repos/local/pi-ext-agent-comms` | where `roles/` and `scripts/` are found |
 | `PI_BACKOFFICE_DIR` | `$HOME/repos/backoffice` | the dir `just backoffice` launches in |
 | `PI_COMS_TEAM` | `team` | default pool for `role` / `backoffice` / `team` (override per-run with `--team`) |
+| `PI_COMS_MAIN_PANE_WIDTH` | `60%` | width of the main (first role) pane in a tiled `team` / `role-team` |
 
 ### Optional: zsh setup
 
@@ -184,7 +185,8 @@ just local-coms --name dev --cname dev           # local unix-socket peer (curre
 just role builder                                # role-file peer (current dir)
 just role builder --team frontend                # ...joined to the `frontend` pool
 just backoffice                                  # backoffice peer (pinned dir)
-just team orchestrator builder scribe            # whole team in tmux, default pool
+just team orchestrator builder scribe            # whole team tiled in one window, default pool
+just team --windows orchestrator builder         # ...one window per role instead
 just role-team frontend orchestrator builder scribe   # ...on a named pool
 just teams                                       # list pools + who's in them
 ```
@@ -263,9 +265,11 @@ The same role name can run in two teams simultaneously (`builder` in `frontend`
 and `builder` in `backend`) — pools are isolated. Within *one* pool a duplicate
 name gets suffixed (`builder2`).
 
-Launch a whole team into a tmux session (`coms-<pool>`, one window per role).
-`just team` uses the default pool, `just role-team` takes the pool name, so you
-can run several teams side by side:
+Launch a whole team into a tmux session (`coms-<pool>`). By default all roles
+share **one window**, tiled `main-vertical`: the first role named gets the big
+left pane, the rest stack in a right-hand column. `just team` uses the default
+pool, `just role-team` takes the pool name, so you can run several teams side by
+side:
 
 ```bash
 just team orchestrator builder scribe researcher   # pool "team" (or $PI_COMS_TEAM)
@@ -277,12 +281,31 @@ just teams
 #   ops         backoffice secops-dev
 ```
 
+Each pane's border carries its role name, since the window name can no longer
+tell them apart. To focus one agent, `prefix-z` zooms the current pane to
+fullscreen (`prefix-z` again to unzoom); `prefix-o` and `prefix-arrow` move
+between them.
+
+Pass `--windows` for one window per role instead (the pre-tiling behaviour). The
+flag works anywhere in the argument list, before, among, or after the roles:
+
+```bash
+just team --windows orchestrator builder scribe
+just role-team ops --windows backoffice secops-dev
+just team orchestrator builder --windows            # same thing
+```
+
+`--tiled` is accepted explicitly too, so the intent can be written either way.
+The main pane's share of the width is `60%`; override with
+`PI_COMS_MAIN_PANE_WIDTH` (any tmux `main-pane-width` value, e.g. `55%` or a
+column count).
+
 Both are the same launcher (`scripts/coms-team`). It validates every role file
-before creating any window, so a typo fails fast with nothing spawned; dispatches
+before creating anything, so a typo fails fast with nothing spawned; dispatches
 `backoffice` to `just backoffice` so it still lands in `PI_BACKOFFICE_DIR`;
 `switch-client`s instead of attaching when you are already inside tmux; and sets
-`remain-on-exit failed` on each window so a peer that dies on boot leaves its
-error on screen instead of the window vanishing.
+`remain-on-exit failed` so a peer that dies on boot leaves its error on screen
+instead of vanishing.
 
 Roles live in `roles/<name>.md` (frontmatter sets name/description/color/model, body
 sets the teammate map): `orchestrator`, `builder`, `researcher`, `secops-dev`,

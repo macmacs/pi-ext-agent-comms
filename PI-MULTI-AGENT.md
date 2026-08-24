@@ -71,7 +71,8 @@ just --list                              # show recipes
 just local-coms --name dev --cname dev   # local unix-socket peer
 just role builder                        # role-file peer (per-role model)
 just backoffice                          # role peer pinned to PI_BACKOFFICE_DIR
-just team orchestrator builder scribe    # whole team in tmux, default pool
+just team orchestrator builder scribe    # whole team tiled in one window, default pool
+just team --windows orchestrator builder # ...one window per role instead
 just role-team ops backoffice secops-dev # ...on a named pool
 just teams                               # list pools + who is in them
 just respawn-demo                        # scripted respawn smoke test (steps)
@@ -80,10 +81,32 @@ just respawn-demo verify researcher "respawned for the smoke test"
 ```
 
 `team` and `role-team` are one implementation (`scripts/coms-team`): all role
-files validated before any window is created, `backoffice` dispatched to its own
+files validated before anything is created, `backoffice` dispatched to its own
 pinned-dir recipe, `switch-client` instead of `attach` when already inside tmux,
-and `remain-on-exit failed` per window so a peer that dies on boot leaves its
-error readable.
+and `remain-on-exit failed` so a peer that dies on boot leaves its error
+readable.
+
+Layout defaults to tiled: one window, one `main-vertical` pane per role, first
+role in the big left pane, role names on the pane borders (`prefix-z` zooms one
+agent). `--windows` gives one window per role instead, and works anywhere in the
+argument list since it arrives through just's `+roles` variadic. Two tmux
+behaviours the tiled path has to work around: a detached `new-session` is created
+at `default-size` 80x24 and tmux then scales the layout proportionally on attach,
+so `main-pane-width 60%` silently becomes 53% - the session is created at the
+real terminal size to avoid it; and pi sets its own pane title via an OSC escape,
+so each pane gets `allow-set-title off` before the role title is applied.
+
+When the terminal size cannot be read (no controlling tty, e.g. launched from a
+daemon) the session really is built at 80x24, so a one-shot `client-resized` hook
+re-runs `select-layout` once a client attaches. Measured on tmux 3.7b, 240-column
+client, three panes: no hook 127 cols, `client-attached` 127 (it fires before the
+client size reaches the window, so the re-layout resolves against the old 80 cols
+and is scaled anyway - i.e. it achieves nothing), `client-resized` 143, the
+intended 60%. The hook unsets itself after firing: leaving it armed would also
+re-assert `main-vertical` on every later resize and so discard any manual pane
+adjustment (drag the divider to 90, resize the terminal, back to 143), and
+self-removing makes this fallback converge on the normal path, which sets no hook
+at all.
 
 ## Respawn demo (context shedding)
 

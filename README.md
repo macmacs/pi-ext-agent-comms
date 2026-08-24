@@ -13,9 +13,28 @@ Slimmed down to just these two extensions from three upstream repos:
 
 ## Install
 
+Global install (recommended) — `coms` then auto-loads in **every** pi session, in any directory, so you no longer need `-e`:
+
 ```bash
-pi install /Users/macmacs/pi-agen-main/pi-ext-agent-comms
+just install-global
 ```
+
+That runs `pi install <repo>` and symlinks the justfile to `~/.config/just/justfile` so `just -g <recipe>` works from anywhere. Or do it by hand:
+
+```bash
+pi install ~/repos/local/pi-ext-agent-comms
+```
+
+> **Filter to `coms.ts`.** The package declares both extensions, but `coms-net.ts`
+> notifies an error on every boot when no hub is configured. Restrict the global
+> install in `~/.pi/agent/settings.json` and keep coms-net opt-in via `just coms`:
+>
+> ```json
+> { "source": "/absolute/path/to/pi-ext-agent-comms",
+>   "extensions": ["extensions/coms.ts"] }
+> ```
+>
+> (pi settings need a real absolute path here — `~` is not expanded.)
 
 Or load for one session only:
 
@@ -25,6 +44,80 @@ pi -e extensions/coms-net.ts   # network hub client
 ```
 
 No runtime dependencies beyond pi's bundled packages. `just` recipes included (`just --list`).
+
+### Running recipes from any working directory
+
+`just` searches **upward** for a justfile and runs recipes in the justfile's own
+directory — so recipes are written to be location-independent. Peers launch in
+**your current directory** (inheriting that project's `.pi/` extensions,
+`AGENTS.md`, RAG index), while `roles/` and `scripts/` always resolve against the
+repo:
+
+```bash
+cd ~/repos/some-project
+just -g role builder                       # after `just install-global`
+just -f ~/repos/local/pi-ext-agent-comms/justfile role builder   # without the symlink
+```
+
+No usernames are baked into the justfile. `repo` resolves in this order:
+`PI_COMS_REPO` → `justfile_directory()` when it contains `roles/` (the normal
+in-repo and `-f` cases) → `$HOME/repos/local/pi-ext-agent-comms` (the `just -g`
+fallback, since the global symlink makes `justfile_directory()` point at
+`~/.config/just`). If your clone lives elsewhere:
+
+```bash
+PI_COMS_REPO=/path/to/clone just -g role builder
+```
+
+| Variable | Default | Controls |
+|---|---|---|
+| `PI_COMS_REPO` | auto-detected, else `$HOME/repos/local/pi-ext-agent-comms` | where `roles/` and `scripts/` are found |
+| `PI_BACKOFFICE_DIR` | `$HOME/repos/backoffice` | the dir `just backoffice` launches in |
+| `PI_COMS_TEAM` | `team` | default pool for `role` / `backoffice` (override per-run with `--team`) |
+
+### Optional: zsh setup
+
+Not required, but removes the `-g` typing. Both snippets go in `~/.zshrc`; this
+repo does not manage your shell config.
+
+Homebrew ships a `just` completion (`_just`). It only activates if Homebrew's
+`site-functions` is on `fpath` **before** `compinit` runs:
+
+```zsh
+if [[ -d /opt/homebrew/share/zsh/site-functions ]]; then
+  fpath=(/opt/homebrew/share/zsh/site-functions $fpath)
+fi
+```
+
+A `j` wrapper that prefers a project's own justfile and falls back to the global
+one, so coms recipes work from anywhere without `-g`:
+
+```zsh
+j() {
+  local d=$PWD n
+  while true; do
+    for n in justfile Justfile .justfile .Justfile; do
+      [[ -f $d/$n ]] && { just "$@"; return }
+    done
+    [[ $d == / || -z $d ]] && break
+    d=${d:h}
+  done
+  just -g "$@"
+}
+# Deferred: plugin managers (antigen, oh-my-zsh) run compinit in a precmd hook,
+# which discards a compdef issued at rc time.
+_j_compdef() { compdef j=just 2>/dev/null; add-zsh-hook -D precmd _j_compdef; }
+autoload -Uz add-zsh-hook && add-zsh-hook precmd _j_compdef
+```
+
+Then `j role builder --team frontend` works from any directory, and `j <TAB>`
+completes recipe names. Two notes:
+
+- A plain `alias j='just -g'` would ignore a project's own justfile — you'd `cd`
+  into a repo, run `j test`, and silently get global recipes. Hence the walk.
+- The walk checks for the file rather than asking `just` to parse it, so a local
+  justfile with a syntax error still wins and reports the parse error instead of
+  silently falling through to the global one.
 
 ## coms (local P2P)
 
@@ -70,14 +163,70 @@ The justfile automates the video-style setups (IndyDevDan's `j` shortcuts):
 ```bash
 brew install just
 
-just local-coms --name dev --cname dev           # local unix-socket peer
+just install-global                              # global coms + `just -g` from anywhere
+just local-coms --name dev --cname dev           # local unix-socket peer (current dir)
+just role builder                                # role-file peer (current dir)
+just role builder --team frontend                # ...joined to the `frontend` pool
+just backoffice                                  # backoffice peer (pinned dir)
+just role-team frontend orchestrator builder scribe   # whole team in tmux
+just teams                                       # list pools + who's in them
 just hub                                         # hub + agents on one machine
 just coms --name dev --cname dev                 # networked peer (auto-discovers local hub)
 just coms-model openrouter/x-ai/grok-5 --name r1 --cname r1
 just team dev prod review                        # hub + 3 peers in one tmux session
 ```
 
-Convention: one extension per agent. `coms.ts` for same-machine unix-socket pools, `coms-net.ts` for anything that goes through the hub (same machine, LAN, or sandboxes).
+### Teams (multiple independent pools)
+
+A "team" is a coms **pool**: a shared discovery namespace at
+`~/.pi/coms/projects/<team>/agents/`. Agents only see each other if they share a
+pool, so you can run several independent teams at once. Every peer also keeps a
+private pool named after itself, so direct addressing still works.
+
+```bash
+just role builder                       # default pool ("team")
+just role builder --team frontend       # frontend pool
+just role builder --team=frontend       # same, equals form
+PI_COMS_TEAM=frontend just role builder # default for this shell
+```
+
+Precedence: `--team` > `PI_COMS_TEAM` > `team`. Any other flags pass straight
+through to `pi`, so you can combine them:
+
+```bash
+just role builder --team frontend --model openrouter/x-ai/grok-5
+```
+
+The same role name can run in two teams simultaneously (`builder` in `frontend`
+and `builder` in `backend`) — pools are isolated. Within *one* pool a duplicate
+name gets suffixed (`builder2`).
+
+Launch a whole team into a tmux session (`coms-<team>`, one window per role), and
+run several teams side by side:
+
+```bash
+just role-team frontend orchestrator builder scribe
+just role-team ops backoffice secops-dev
+just teams
+#   frontend    orchestrator builder scribe
+#   ops         backoffice secops-dev
+```
+
+Roles live in `roles/<name>.md` (frontmatter sets name/description/color, body sets
+the teammate map): `orchestrator`, `builder`, `researcher`, `secops-dev`, `scribe`,
+`backoffice`. `just role <name>` launches any of them in your current directory.
+`just backoffice` is different — it **always** lands in the backoffice dir
+(`PI_BACKOFFICE_DIR`, default `~/repos/backoffice`) no matter where you invoke it,
+so it picks up that dir's local RAG extension and `AGENTS.md`. It takes `--team`
+too:
+
+```bash
+just -g backoffice                                  # always ~/repos/backoffice
+just -g backoffice --team ops                       # ...in the `ops` pool
+PI_BACKOFFICE_DIR=/other/kb just -g backoffice      # point it elsewhere
+```
+
+Convention: one extension per agent. `coms.ts` for same-machine unix-socket pools, `coms-net.ts` for anything that goes through the hub (same machine, LAN, or sandboxes). With a global `coms.ts` install the `coms`/`coms-model` recipes still pass `-e coms-net.ts` explicitly, keeping hub usage opt-in.
 
 Reconstructed example prompts from the Pi to Pi video: see `PI-MULTI-AGENT.md`.
 

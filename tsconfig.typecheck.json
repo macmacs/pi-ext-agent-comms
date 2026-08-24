@@ -8,7 +8,6 @@
     "skipLibCheck": true,
     "strict": false,
     "types": ["node"],
-    "ignoreDeprecations": "6.0",
     "baseUrl": ".",
     "paths": {
       "@earendil-works/pi-coding-agent": [

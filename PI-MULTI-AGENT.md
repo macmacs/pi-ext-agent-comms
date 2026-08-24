@@ -20,7 +20,7 @@ Key reference: https://www.youtube.com/watch?v=PIdETjcXNIk (chapters: "21:39 Pi 
 ## Install
 
 ```bash
-pi install /Users/macmacs/pi-agen-main/pi-ext-agent-comms
+pi install ~/repos/local/pi-ext-agent-comms
 ```
 
 Package contents: `extensions/coms.ts`, `extensions/coms-net.ts` (+ helpers `editor-host.ts`, `naming.ts`, `lib/themeMap.ts`), `scripts/coms-net-server.ts`, `scripts/agent-picker`, `justfile`.
@@ -99,7 +99,7 @@ just respawn-demo verify researcher "respawned for the smoke test"
 `verify` checks three on-disk invariants:
 
 - `~/.pi/coms/projects/team/agents/researcher.json` — `session_id` changed vs the snapshot, `pid` unchanged, `started_at` updated.
-- The session jsonl under `~/.pi/agent/sessions/--Users-macmacs-repos-pi-ext-agent-comms--/` whose `coms-log` boot event carries the new `session_id` (respawn writes a new jsonl; all peers launched from this repo share the dir, so match by boot event, not mtime).
+- The session jsonl under `~/.pi/agent/sessions/` for this repo's path (dir name is the repo path with `/` → `-`, e.g. `--Users-<you>-repos-local-pi-ext-agent-comms--`) whose `coms-log` boot event carries the new `session_id` (respawn writes a new jsonl; all peers launched from this repo share the dir, so match by boot event, not mtime).
 - The kickoff note appears as that session's first user message — identity preservation (role file replays via system-prompt regeneration) is confirmed by the peer still answering as `researcher`.
 
 Smoke-tested end to end: old sid `01M0QY5RVMY2EB68QAC3FCWTBB` → new `01M0QY9WJHFPD3HQK5FM8TRM5K`, same pid, kickoff note landed as the fresh session's first message.
@@ -197,7 +197,7 @@ Semantics:
 
 ```just
 role name:
-    cd ~/agents/{{name}} && pi -e /Users/macmacs/pi-agen-main/pi-ext-agent-comms/extensions/coms.ts --cname {{name}} --project team
+    cd ~/agents/{{name}} && pi -e ~/repos/local/pi-ext-agent-comms/extensions/coms.ts --cname {{name}} --project team
 ```
 
 ```bash
@@ -231,5 +231,5 @@ Other pi multi-agent patterns (not used here, for reference): the official `exam
 
 - Pi to Pi video: https://www.youtube.com/watch?v=PIdETjcXNIk (channel: @indydevdan)
 - Base repo: https://github.com/disler/pi-vs-claude-code (coms extensions, forks: terakael for TUI/race fixes)
-- Local package: `/Users/macmacs/pi-agen-main/pi-ext-agent-comms` (slimmed to coms + coms-net, merged fork fixes, import-normalized)
+- Local package: `~/repos/local/pi-ext-agent-comms` (slimmed to coms + coms-net, merged fork fixes, import-normalized)
 - pi docs: `/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs/` (settings.md, packages.md, sdk.md, rpc.md)

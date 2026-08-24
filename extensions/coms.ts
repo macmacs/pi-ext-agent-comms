@@ -59,6 +59,12 @@ const TREE_PING_HOP_TIMEOUT_MS = 3_000;
 const SEND_TIMEOUT_MS = 15_000;
 const TREE_PING_MAX_DEPTH = 5;
 const STALE_TIMEOUT_MS = PING_INTERVAL_MS * 3; // evict after 3 missed cascade cycles
+// Anthropic's prompt cache TTL. A session idle longer than this has a cold
+// cache anyway, so respawning it costs nothing in cache terms and shedding the
+// stale context is pure win. Drives the idle/stale reporting in coms_list and
+// the orchestrator's cold-respawn decisions.
+const CACHE_TTL_MS =
+  Number(process.env.PI_COMS_CACHE_TTL_MS) || 5 * 60_000;
 const IS_ROOT = !process.env.PI_PARENT_SESSION;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const LINE_CAP_BYTES = 64 * 1024;
@@ -76,7 +82,12 @@ const FALLBACK_PALETTE = [
 
 // ━━ Types ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-type EnvelopeType = "prompt" | "ping" | "tree_ping" | "respawn_request";
+type EnvelopeType =
+  | "prompt"
+  | "ping"
+  | "tree_ping"
+  | "respawn_request"
+  | "respawn_cold";
 
 interface Envelope {
   type: EnvelopeType;
@@ -97,6 +108,20 @@ interface PromptEnvelope extends Envelope {
 
 interface RespawnRequestEnvelope extends Envelope {
   type: "respawn_request";
+  reason?: string | null;
+  sender_name: string;
+  sender_cwd: string;
+  conversation_id?: string | null;
+}
+
+// Cold respawn: the sender DECIDES, the receiving extension executes without
+// ever waking the LLM. Deliberately not a "request" like the above - no message
+// is delivered to the peer and no turn is triggered, so the peer never pays to
+// reheat the stale context it is about to discard. The note is seeded as stored
+// context for whenever the peer is next prompted.
+interface RespawnColdEnvelope extends Envelope {
+  type: "respawn_cold";
+  note?: string | null;
   reason?: string | null;
   sender_name: string;
   sender_cwd: string;
@@ -143,6 +168,10 @@ interface AgentCard {
   context_used_pct: number;
   is_running?: boolean;
   is_blocked?: boolean;
+  // When the peer's last turn ended, so callers can compute idle time from the
+  // LIVE peer rather than the registry snapshot (which only refreshes on the
+  // keepalive tick). Optional: an older peer simply omits it.
+  last_turn_end_at?: string | null;
 }
 
 interface Pong {
@@ -183,6 +212,11 @@ interface RegistryEntry {
   queue_depth?: number;
   is_running?: boolean;
   heartbeat_at?: string;
+  // When this agent's last turn ENDED. Absent means "no turn has ended yet"
+  // (fresh or cold-respawned session), which reads as fully idle. Optional so
+  // entries written by an older coms build still parse; every reader treats a
+  // missing value as unknown rather than zero.
+  last_turn_end_at?: string;
   tmux_session?: string;
   tmux_window?: string;
   tmux_pane?: string;
@@ -303,6 +337,31 @@ function makeEndpoint(sessionId: string): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+// Milliseconds since the agent's last turn ended, or null when that is unknown
+// (a peer running an older coms build that never writes the field) or
+// meaningless (the agent is mid-turn, so it is not idle at all). Returning null
+// rather than 0 keeps "unknown" and "just finished" distinguishable, so a caller
+// never mistakes a silent older peer for a fresh one.
+function idleMsSince(
+  lastTurnEndAt: string | null | undefined,
+  running: boolean,
+): number | null {
+  if (running) return null;
+  if (!lastTurnEndAt) return null;
+  const t = Date.parse(lastTurnEndAt);
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, Date.now() - t);
+}
+
+// Compact idle rendering for LLM consumption: this is re-read on every poll, so
+// it stays short and unit-suffixed rather than spelling out durations.
+function formatIdle(ms: number | null): string {
+  if (ms == null) return "?";
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
+  return `${(ms / 3_600_000).toFixed(1)}h`;
 }
 
 function abbreviateModel(model: string, maxLen = 20): string {
@@ -774,6 +833,9 @@ export default function (pi: ExtensionAPI) {
   let widgetVisible = true;
   let agentRunning = false;
   let agentBlocked = false;
+  // When this agent's last turn ended. null until the first turn completes, so a
+  // fresh or cold-respawned session reports as fully idle rather than busy.
+  let lastTurnEndAt: string | null = null;
   let spinnerFrame = 0;
   let spinnerTimer: NodeJS.Timeout | null = null;
   const host = getEditorHost();
@@ -782,7 +844,14 @@ export default function (pi: ExtensionAPI) {
   // cleanShutdown to broadcast a respawning status and skip registry removal.
   let respawning = false;
   // Stash between the coms_respawn tool and the /coms-respawn command it queues.
-  let pendingRespawn: { note?: string; conversation_id?: string } | null = null;
+  // `cold` selects the turn-free path: seed the note as stored context and send
+  // no prompt, so the fresh session idles at zero API cost until real work
+  // arrives. Warm (the default) fires a kickoff turn to continue immediately.
+  let pendingRespawn: {
+    note?: string;
+    conversation_id?: string;
+    cold?: boolean;
+  } | null = null;
   // True while a /coms-respawn follow-up is queued but not yet consumed, so a
   // second coms_respawn call in the same session updates the note instead of
   // stacking a duplicate respawn.
@@ -817,9 +886,17 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Phase A stub handlers — each just acks valid envelopes. Phase B replaces these.
-  function ackOk(socket: net.Socket, msg_id: string): void {
+  // extra rides along in the ack so a caller can distinguish "queued" from a
+  // guardrail skip without a second round trip.
+  function ackOk(
+    socket: net.Socket,
+    msg_id: string,
+    extra?: Record<string, unknown>,
+  ): void {
     try {
-      socket.write(JSON.stringify({ type: "ack", msg_id }) + "\n");
+      socket.write(
+        JSON.stringify({ type: "ack", msg_id, ...(extra ?? {}) }) + "\n",
+      );
     } catch {
       // ignore
     }
@@ -932,6 +1009,75 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  // Cold respawn: execute, do not ask. The sender has already decided; waking
+  // the LLM to confirm would re-send the entire stale context at full uncached
+  // price only to discard it, which is exactly the cost this path exists to
+  // avoid. So no message is delivered and no turn is triggered: we queue the
+  // /coms-respawn command with cold semantics and ack the result.
+  function handleRespawnCold(
+    socket: net.Socket,
+    env: RespawnColdEnvelope,
+  ): void {
+    if (typeof env.hops !== "number" || env.hops >= MAX_HOPS) {
+      nack(socket, env.msg_id, "hops exceeded");
+      return;
+    }
+
+    // Guardrail: work in flight must never be discarded. A busy or blocked peer
+    // is a clean no-op, not an error, so the caller can poll a pool and act on
+    // whoever is idle without special-casing the rest.
+    const effective = recomputeEffective();
+    if (effective.running || agentRunning) {
+      ackOk(socket, env.msg_id, { skipped: "running" });
+      return;
+    }
+    if (effective.blocked) {
+      ackOk(socket, env.msg_id, { skipped: "blocked" });
+      return;
+    }
+    // An already-queued respawn would otherwise stack a second replacement.
+    if (respawnFollowUpQueued || pendingRespawn) {
+      ackOk(socket, env.msg_id, { skipped: "already_queued" });
+      return;
+    }
+
+    pendingRespawn = {
+      note: env.note ?? undefined,
+      conversation_id: env.conversation_id ?? undefined,
+      cold: true,
+    };
+
+    // expandPromptTemplates routes this to the registered command handler
+    // instead of the model, so the queued message is consumed by /coms-respawn
+    // and never becomes an LLM request. followUp (not steer) so it lands only
+    // once the peer is settled; since the peer is idle by the guardrail above,
+    // that is immediately, and no turn is triggered because pi dispatches the
+    // extension command during expansion rather than prompting the model.
+    try {
+      pi.sendUserMessage("/coms-respawn", {
+        deliverAs: "followUp",
+        expandPromptTemplates: true,
+      });
+      respawnFollowUpQueued = true;
+    } catch (err) {
+      pendingRespawn = null;
+      nack(socket, env.msg_id, "internal error");
+      return;
+    }
+
+    ackOk(socket, env.msg_id, { queued: true });
+    try {
+      pi.appendEntry("coms-log", {
+        event: "inbound_respawn_cold",
+        msg_id: env.msg_id,
+        sender: env.sender_name,
+        hops: env.hops,
+      });
+    } catch {
+      // best-effort
+    }
+  }
+
   function handlePing(socket: net.Socket, env: PingEnvelope): void {
     const ctx = currentCtx;
     const ident = identity;
@@ -945,6 +1091,9 @@ export default function (pi: ExtensionAPI) {
       context_used_pct: pct,
       is_running: effective.running,
       is_blocked: effective.blocked || undefined,
+      // Live idle marker: lets the asker compute idle time from the peer itself
+      // instead of the registry snapshot, which only refreshes on keepalive.
+      last_turn_end_at: lastTurnEndAt,
     };
     const pong: Pong = { type: "pong", msg_id: env.msg_id, agent_card: card };
     try {
@@ -1402,6 +1551,8 @@ export default function (pi: ExtensionAPI) {
           void handleTreePing(socket, parsed as TreePingEnvelope);
         } else if (parsed.type === "respawn_request") {
           handleRespawnRequest(socket, parsed as RespawnRequestEnvelope);
+        } else if (parsed.type === "respawn_cold") {
+          handleRespawnCold(socket, parsed as RespawnColdEnvelope);
         } else if (parsed.type === "status") {
           handleStatus(socket, parsed as unknown as StatusMessage);
         } else {
@@ -1858,6 +2009,8 @@ export default function (pi: ExtensionAPI) {
           version: 1,
           context_used_pct: Math.round(ctx?.getContextUsage()?.percent ?? 0),
           heartbeat_at: nowIso(),
+          is_running: agentRunning,
+          last_turn_end_at: lastTurnEndAt ?? undefined,
           tmux_session: identity.tmux_session,
           tmux_window: identity.tmux_window,
           tmux_pane: identity.tmux_pane,
@@ -1908,6 +2061,7 @@ export default function (pi: ExtensionAPI) {
       context_used_pct: pct,
       is_running: effective.running,
       is_blocked: effective.blocked || undefined,
+      last_turn_end_at: lastTurnEndAt,
     };
   }
 
@@ -2686,6 +2840,13 @@ export default function (pi: ExtensionAPI) {
       const agents = collected.map((c, i) => {
         const r = pongs[i];
         const pong = r.status === "fulfilled" ? r.value : null;
+        // Prefer the live pong (current) over the registry snapshot (only as
+        // fresh as the last keepalive tick). Both may be absent on an older
+        // peer, in which case idle is simply unknown and reported as such.
+        const lastEnd =
+          pong?.last_turn_end_at ?? c.entry.last_turn_end_at ?? null;
+        const running = pong?.is_running ?? c.entry.is_running ?? false;
+        const idleMs = idleMsSince(lastEnd, running);
         return {
           name: c.entry.name,
           session_id: c.entry.session_id,
@@ -2696,6 +2857,12 @@ export default function (pi: ExtensionAPI) {
           alive: pong != null,
           context_used_pct: pong ? pong.context_used_pct : null,
           color: c.entry.color,
+          running,
+          blocked: pong?.is_blocked ?? false,
+          idle_ms: idleMs,
+          // Precomputed so the reader does not have to know the TTL: past this
+          // point the prompt cache is cold anyway and a cold respawn is free.
+          cache_cold: idleMs != null ? idleMs >= CACHE_TTL_MS : false,
         };
       });
 
@@ -2709,7 +2876,12 @@ export default function (pi: ExtensionAPI) {
                     ? ` ${a.context_used_pct}%`
                     : " ?%";
                 const live = a.alive ? "●" : "✗";
-                return `${live} @${a.name} (${a.model})${ctxStr}${a.purpose ? ` — ${a.purpose}` : ""}`;
+                const state = a.running
+                  ? " running"
+                  : a.blocked
+                    ? " blocked"
+                    : ` idle ${formatIdle(a.idle_ms)}${a.cache_cold ? " (cache cold)" : ""}`;
+                return `${live} @${a.name} (${a.model})${ctxStr}${state}${a.purpose ? ` — ${a.purpose}` : ""}`;
               })
               .join("\n");
 
@@ -2747,7 +2919,15 @@ export default function (pi: ExtensionAPI) {
             : theme.fg("error", "✗");
           const pct =
             a.context_used_pct != null ? `${a.context_used_pct}%` : "?%";
-          return `${dot} ${theme.fg("accent", `@${a.name}`)} ${theme.fg("dim", a.model)} ${theme.fg("warning", pct)}`;
+          const state = a.running
+            ? theme.fg("success", "running")
+            : a.blocked
+              ? theme.fg("warning", "blocked")
+              : theme.fg(
+                  a.cache_cold ? "warning" : "dim",
+                  `idle ${formatIdle(a.idle_ms ?? null)}`,
+                );
+          return `${dot} ${theme.fg("accent", `@${a.name}`)} ${theme.fg("dim", a.model)} ${theme.fg("warning", pct)} ${state}`;
         })
         .join("\n");
       return new Text(header + "\n" + rows, 0, 0);
@@ -2865,12 +3045,21 @@ export default function (pi: ExtensionAPI) {
     description:
       "Respawn your own agent session: shed stale context by starting a fresh session in-process. " +
       "Your identity (role file) carries over via pi's system-prompt regeneration. " +
-      "Queues the /coms-respawn command as a follow-up; takes effect once the current turn settles.",
+      "Queues the /coms-respawn command as a follow-up; takes effect once the current turn settles. " +
+      "Set cold:true when you have no work in flight: the fresh session is seeded with your note as " +
+      "stored context and fires NO turn, so it idles at zero cost until real work arrives. Leave it " +
+      "unset to continue working immediately in the fresh session.",
     parameters: Type.Object({
       note: Type.Optional(
         Type.String({
           description:
             "Kickoff note for your fresh session (what you're continuing). Defaults to a generic continue-work note.",
+        }),
+      ),
+      cold: Type.Optional(
+        Type.Boolean({
+          description:
+            "Respawn without firing a turn: seed the note as stored context and idle. Use between tasks; do not use when work is in flight.",
         }),
       ),
     }),
@@ -2881,6 +3070,7 @@ export default function (pi: ExtensionAPI) {
       pendingRespawn = {
         note: params.note || undefined,
         conversation_id: lastRespawnRequestConversationId ?? undefined,
+        cold: params.cold === true,
       };
       lastRespawnRequestConversationId = null;
       // One respawn per session: a second call updates the pending note
@@ -2904,6 +3094,7 @@ export default function (pi: ExtensionAPI) {
         ],
         details: {
           note: params.note ?? null,
+          cold: params.cold === true,
           conversation_id: pendingRespawn.conversation_id ?? null,
         },
       };
@@ -3036,6 +3227,145 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // ━━ coms_cold_respawn ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Sibling of coms_request_respawn with deliberately different semantics: this
+  // one DECIDES rather than asks. The peer retains no veto because a veto needs
+  // a turn to exercise, and that turn would re-send the whole stale context at
+  // uncached price - the exact cost this tool exists to avoid. The peer's
+  // interests are protected structurally instead: it is skipped whenever work is
+  // in flight (running, blocked, or already respawning).
+
+  pi.registerTool({
+    name: "coms_cold_respawn",
+    label: "Coms Cold Respawn",
+    description:
+      "Replace an IDLE peer's session with a fresh one without costing it a turn. Unlike " +
+      "coms_request_respawn, the peer is not asked and never wakes: no message is delivered, no LLM " +
+      "call is made, and it does not reheat the context it is about to discard. Your note is seeded " +
+      "as stored context for whenever it is next prompted. A peer that is running, blocked, or " +
+      "already respawning is SKIPPED, not errored - check the result. Use this to recycle stale " +
+      "peers between tasks (see idle time in coms_list).",
+    parameters: Type.Object({
+      to: Type.String({
+        description:
+          "Peer name (preferred, scoped to your project) or session_id (global).",
+      }),
+      note: Type.Optional(
+        Type.String({
+          description:
+            "Note seeded into the peer's fresh session as stored context (what it should know / pick up next).",
+        }),
+      ),
+      reason: Type.Optional(
+        Type.String({
+          description: "Why it is being recycled (for the audit log).",
+        }),
+      ),
+    }),
+    async execute(_callId, params) {
+      if (!identity) {
+        throw new Error("coms not initialised");
+      }
+      const target = resolveTarget(params.to);
+      if (!target) {
+        throw new Error(`coms: no live agent matching "${params.to}"`);
+      }
+      if (target.session_id === identity.session_id) {
+        throw new Error(
+          "coms: use coms_respawn with cold:true to respawn your own session",
+        );
+      }
+      const hops = currentInbound ? currentInbound.hops + 1 : 0;
+      if (hops >= MAX_HOPS) {
+        throw new Error(`coms: hop limit reached (${hops} >= ${MAX_HOPS})`);
+      }
+      const msg_id = ulid();
+      const env: RespawnColdEnvelope = {
+        type: "respawn_cold",
+        msg_id,
+        sender_session: identity.session_id,
+        sender_endpoint: identity.endpoint,
+        sender_name: identity.name,
+        sender_cwd: identity.cwd,
+        hops,
+        timestamp: nowIso(),
+        note: params.note ?? null,
+        reason: params.reason ?? null,
+        conversation_id: identity.session_id,
+      };
+
+      const resp = await sendEnvelope(target.endpoint, env);
+      // The ack carries the outcome: the receiver's guardrails run before it
+      // replies, so a skip is known here without polling.
+      const skipped =
+        resp && typeof (resp as any).skipped === "string"
+          ? ((resp as any).skipped as string)
+          : null;
+      try {
+        pi.appendEntry("coms-log", {
+          event: "outbound_respawn_cold",
+          msg_id,
+          target: target.name,
+          skipped,
+          hops,
+        });
+      } catch {
+        /* best-effort */
+      }
+
+      const text = skipped
+        ? `coms_cold_respawn → ${target.name}: skipped (${skipped}), session left intact`
+        : `coms_cold_respawn → ${target.name}: queued, no turn fired`;
+      return {
+        content: [{ type: "text" as const, text }],
+        details: {
+          msg_id,
+          target: target.name,
+          target_session: target.session_id,
+          skipped,
+          hops,
+        },
+      };
+    },
+    renderCall(args, theme) {
+      const tgt = (args as any).to ?? "?";
+      const reason = (args as any).reason ?? "";
+      const preview = reason.length > 60 ? reason.slice(0, 57) + "..." : reason;
+      return new Text(
+        theme.fg("toolTitle", theme.bold("coms_cold_respawn ")) +
+          theme.fg("accent", tgt) +
+          (preview
+            ? theme.fg("dim", " — ") + theme.fg("muted", preview)
+            : ""),
+        0,
+        0,
+      );
+    },
+    renderResult(result, _options, theme) {
+      const d = result.details as any;
+      if (!d) {
+        const t = result.content[0];
+        return new Text(t?.type === "text" ? t.text : "", 0, 0);
+      }
+      if (d.skipped) {
+        return new Text(
+          theme.fg("warning", "⊘ ") +
+            theme.fg("accent", d.target) +
+            theme.fg("dim", `  skipped: ${d.skipped}`),
+          0,
+          0,
+        );
+      }
+      return new Text(
+        theme.fg("success", "❄ ") +
+          theme.fg("accent", d.target) +
+          theme.fg("dim", "  cold, no turn"),
+        0,
+        0,
+      );
+    },
+  });
+
   // ━━ agent_start: arm currentInbound for hop-count inheritance ━━━━━━━━━━━━━━
   // Reads hops directly from the coms-inbound message details.
   // Proactive (non-coms) turns set currentInbound = null so outbound
@@ -3063,18 +3393,58 @@ export default function (pi: ExtensionAPI) {
 
   // (agent_end auto-reply removed — agents decide whether to reply via coms_send)
 
-  pi.on("before_agent_start", async (_event, ctx) => {
-    if (!identity || !ctx.hasUI) return;
-    try {
-      ctx.ui.setWorkingVisible(false);
-    } catch {
-      /* ignore */
+  // ━━ Session hygiene rule (system prompt) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Lives in the extension rather than an AGENTS.md so it travels with coms to
+  // every agent on the machine, and so the orchestrator-only line can be
+  // tailored from the role identity we already hold. Returned from
+  // before_agent_start, which chains per turn and is NOT stored in the session,
+  // so it cannot accumulate across turns the way an injected message would.
+  const CACHE_TTL_MIN = Math.round(CACHE_TTL_MS / 60_000);
+
+  function sessionHygieneRule(): string {
+    const isOrchestrator = /orchestrator/i.test(identity?.name ?? "");
+    const lines = [
+      "## Session hygiene (coms)",
+      "",
+      "- One task per session. Do not carry a session across unrelated tasks.",
+      `- The prompt cache TTL is ${CACHE_TTL_MIN} minutes. A session idle much longer than that has a cold cache already, so there is nothing left to preserve.`,
+      "- Respawning while IDLE is free. Respawning after a prompt has landed costs a full context reheat, so never respawn as the first act of a turn: finish the turn, then respawn.",
+    ];
+    if (isOrchestrator) {
+      lines.push(
+        "- Watch peer idle time in coms_list and cold-respawn stale peers between tasks with coms_cold_respawn. It costs them no turn. Busy peers are skipped automatically.",
+      );
+    } else {
+      lines.push(
+        "- Finish or hand off in-flight work before respawning. Never respawn mid-edit or while holding uncommitted work nobody has reported.",
+        "- Use coms_respawn with cold:true between tasks: it seeds your note and idles at zero cost.",
+      );
     }
+    return lines.join("\n");
+  }
+
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (!identity) return;
+    if (ctx.hasUI) {
+      try {
+        ctx.ui.setWorkingVisible(false);
+      } catch {
+        /* ignore */
+      }
+    }
+    // Chain onto the prompt as it stands for this handler, so other extensions'
+    // changes are preserved.
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n${sessionHygieneRule()}`,
+    };
   });
 
   pi.on("agent_end", async () => {
     if (!identity) return;
     agentRunning = false;
+    // Recorded here rather than on a timer: agent_end is the moment the context
+    // stops changing, which is exactly when the prompt cache starts going cold.
+    lastTurnEndAt = nowIso();
     broadcastStatus(false);
     updateSpinnerTimer();
     if (!firstTurnDone) {
@@ -3171,6 +3541,8 @@ export default function (pi: ExtensionAPI) {
           version: 1,
           context_used_pct: Math.round(ctx?.getContextUsage()?.percent ?? 0),
           heartbeat_at: nowIso(),
+          is_running: agentRunning,
+          last_turn_end_at: lastTurnEndAt ?? undefined,
           tmux_session: identity.tmux_session,
           tmux_window: identity.tmux_window,
           tmux_pane: identity.tmux_pane,
@@ -3289,8 +3661,13 @@ export default function (pi: ExtensionAPI) {
       }
       pendingRespawn = null;
 
-      // Kickoff always fires a turn: the trigger note if provided, else the
-      // default. When the triggering request carried a conversation id, thread it.
+      // Cold vs warm is the whole point of this path. Warm fires a kickoff turn
+      // so the peer continues immediately. Cold fires NOTHING: the note is
+      // seeded via setup() as a stored user message, and with no withSession
+      // callback there is no sendUserMessage and therefore no LLM request. The
+      // fresh session sits idle at zero API cost, and the note is already in
+      // context whenever someone next prompts it.
+      const cold = pending?.cold === true;
       let kickoff: string;
       const conversationId = pending?.conversation_id;
       const continuation = conversationId
@@ -3298,6 +3675,10 @@ export default function (pi: ExtensionAPI) {
         : "";
       if (pending?.note && pending.note.trim()) {
         kickoff = pending.note.trim() + continuation;
+      } else if (cold) {
+        kickoff =
+          "Your session was replaced to shed stale context while you were idle. " +
+          "No work is in flight. Await instructions." + continuation;
       } else {
         kickoff =
           "You respawned to shed stale context. Continue your current work." +
@@ -3311,11 +3692,31 @@ export default function (pi: ExtensionAPI) {
 
       let cancelled = true;
       try {
+        // Only plain data (strings) crosses into these callbacks: captured
+        // pi/ctx/sessionManager objects are stale after replacement and throw.
         const result = await ctx.newSession({
           parentSession,
-          withSession: async (freshCtx) => {
-            await freshCtx.sendUserMessage(kickoff);
+          setup: async (sm) => {
+            // Stored, not sent: appendMessage writes the note into the fresh
+            // session's history without dispatching a request. Used for cold
+            // only; the warm path delivers the same text as a real prompt.
+            if (cold) {
+              sm.appendMessage({
+                role: "user",
+                content: [{ type: "text", text: kickoff }],
+                timestamp: Date.now(),
+              });
+            }
           },
+          // Omitted entirely when cold: any withSession callback that sends a
+          // message would trigger the turn this path exists to avoid.
+          ...(cold
+            ? {}
+            : {
+                withSession: async (freshCtx) => {
+                  await freshCtx.sendUserMessage(kickoff);
+                },
+              }),
         });
         cancelled = result.cancelled === true;
       } catch {

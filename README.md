@@ -176,6 +176,43 @@ just coms-model openrouter/x-ai/grok-5 --name r1 --cname r1
 just team dev prod review                        # hub + 3 peers in one tmux session
 ```
 
+### Per-role models
+
+A role file can name the model it runs on, so the expensive roles get the
+expensive model and the rest don't. `model:` in the frontmatter becomes the
+default `--model`, using pi's own `<provider>/<id>[:<thinking>]` syntax:
+
+```markdown
+---
+name: scribe
+description: doc writer/reader/summarizer, owns the team's written record
+color: "#C792EA"
+model: litellm/claude-sonnet-4-6
+---
+```
+
+It is a **default**, not a pin: an explicit `--model` (or `--provider`) on the
+command line suppresses it, and a role file without a `model:` key falls back to
+your `defaultModel` setting exactly as before.
+
+```bash
+just role builder                                    # litellm/claude-opus-5:high (from builder.md)
+just role scribe                                     # litellm/claude-sonnet-4-6 (from scribe.md)
+just role scribe --model litellm/claude-opus-5       # explicit wins
+just role-team frontend orchestrator builder scribe   # each window on its own model
+```
+
+The shipped defaults: `orchestrator` and `builder` on `claude-opus-5:high` (they
+decide and they write code), `researcher` on `claude-sonnet-4-6:high`, and
+`scribe`, `secops-dev`, `backoffice` on `claude-sonnet-4-6`. Edit the role files
+to suit your own catalogue — `pi --list-models` shows what you can name.
+
+Read at **launch** time by `just role` / `just backoffice` (via
+`scripts/role-field`), so the session starts on the right model rather than
+switching after the first turn, and the choice survives `coms_respawn`. The
+hub recipes (`just coms`, `just coms-model`) take no role file, so they stay
+explicit-model.
+
 ### Teams (multiple independent pools)
 
 A "team" is a coms **pool**: a shared discovery namespace at
@@ -212,9 +249,10 @@ just teams
 #   ops         backoffice secops-dev
 ```
 
-Roles live in `roles/<name>.md` (frontmatter sets name/description/color, body sets
-the teammate map): `orchestrator`, `builder`, `researcher`, `secops-dev`, `scribe`,
-`backoffice`. `just role <name>` launches any of them in your current directory.
+Roles live in `roles/<name>.md` (frontmatter sets name/description/color/model, body
+sets the teammate map): `orchestrator`, `builder`, `researcher`, `secops-dev`,
+`scribe`, `backoffice`. `just role <name>` launches any of them in your current
+directory.
 `just backoffice` is different — it **always** lands in the backoffice dir
 (`PI_BACKOFFICE_DIR`, default `~/repos/backoffice`) no matter where you invoke it,
 so it picks up that dir's local RAG extension and `AGENTS.md`. It takes `--team`

@@ -215,6 +215,36 @@ reviewer *args:
     pi -t read,grep,find,ls,coms_list,coms_send -e extensions/coms.ts --cname reviewer {{args}}
 ```
 
+### Per-role models (what this repo actually does)
+
+The role-dir pattern above puts `defaultModel` in a per-directory
+`.pi/settings.json`. This repo takes the flags-in-recipes route instead, because
+role peers all launch in *your* current directory and so cannot have differing
+directory settings: `model:` in `roles/<name>.md` frontmatter, read at launch by
+`scripts/role-field` and passed as `--model`.
+
+```markdown
+---
+name: builder
+description: builder, implements decisions into working code
+color: "#72F1B8"
+model: litellm/claude-opus-5:high
+---
+```
+
+- Value is pi's `--model` syntax verbatim, so `:<thinking>` rides along for free
+  and needs no parsing on our side.
+- Precedence: explicit `--model`/`--provider` > role frontmatter > your
+  `defaultModel` setting. A role file with no `model:` key behaves as before.
+- Launch-time, not runtime: the first token is already on the right model, and
+  because `/coms-respawn` replaces the session in-process, the flag survives a
+  respawn.
+- `role`, `backoffice`, and therefore `role-team` honour it. `coms`/`coms-model`
+  take no role file, so they stay explicit-model — note that `coms-net.ts` *does*
+  parse frontmatter for name/description/color (its own copy of
+  `readFrontmatterFromArgv`), so a role file handed to `just coms` gives identity
+  but not model. Deliberate, not an oversight.
+
 ## pi messaging primitives (reference)
 
 | Primitive | Where | Purpose |

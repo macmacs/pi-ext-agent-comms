@@ -269,6 +269,7 @@ just team --windows orchestrator builder         # ...one window per role instea
 just role-team frontend orchestrator builder scribe   # ...on a named pool
 just teams                                       # list pools + who's in them
 just respawn-demo                                # scripted respawn smoke test (prints steps)
+just typecheck                                   # tsc over the extensions (needs `npm install` once)
 ```
 
 ### Per-role models
@@ -416,6 +417,7 @@ bind a display-popup -E -w 82% -h 65% "agent-picker"
 
 ## Notes
 
+- Typecheck: `npm install` once (pins tsc 5.9.3 plus the pi packages as dev deps for their `.d.ts` only, nothing at runtime), then `just typecheck`. It resolves types through `node_modules`, so it works on any clone. `coms-net.ts` is excluded from `tsconfig.typecheck.json`: it has two pre-existing `registerTool` inference errors where a `details` union has optional keys the first branch made required, so including it would land a permanently red typecheck. Fixing them is a code change, tracked separately.
 - coms.ts requires `editor-host.ts` and `naming.ts` (bundled helpers, loaded as plain modules)
 - Theme: coms/coms-net apply the bundled `ocean-breeze` theme
 - Removed extensions (agent-team, agent-chain, pi-pi, damage-control, subagent-widget, orchestrator, etc.) are recoverable from git history, e.g. `git show 75a2a8d:extensions/subagent-widget.ts`

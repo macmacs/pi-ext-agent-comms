@@ -41,6 +41,26 @@ install-global:
     ln -sf "{{repo}}/justfile" "${XDG_CONFIG_HOME:-$HOME/.config}/just/justfile"
     echo "→ symlinked justfile to global location; now 'just -g <recipe>' works from any dir"
 
+# Typecheck the extensions with the repo's own pinned tsc (5.9.3). Deliberately
+# does NOT run npm install for you: a recipe that mutates node_modules behind
+# your back is a surprise, and the install is a one-time step.
+# Covers coms.ts, editor-host.ts and naming.ts; coms-net.ts is excluded, see
+# tsconfig.typecheck.json and the README.
+#   npm install     # once
+#   just typecheck
+[doc("Typecheck the extensions with the repo's pinned tsc")]
+typecheck:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tsc="{{repo}}/node_modules/typescript/bin/tsc"
+    if [ ! -f "$tsc" ]; then
+      echo "typecheck: no local typescript found at $tsc" >&2
+      echo "  run 'npm install' in {{repo}} first (installs the pinned tsc + pi type deps)" >&2
+      exit 1
+    fi
+    cd "{{repo}}" && node "$tsc" -p tsconfig.typecheck.json
+    echo "→ typecheck clean"
+
 # ---------------------- coms (local P2P, unix sockets) ----------------------
 # These assume coms is installed globally (see install-global). If it is not,
 # add `-e {{repo}}/extensions/coms.ts` to the pi invocation.

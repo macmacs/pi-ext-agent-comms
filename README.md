@@ -76,6 +76,7 @@ PI_COMS_REPO=/path/to/clone just -g role builder
 | `PI_BACKOFFICE_DIR` | `$HOME/repos/backoffice` | the dir `just backoffice` launches in |
 | `PI_COMS_TEAM` | `team` | default pool for `role` / `backoffice` / `team` (override per-run with `--team`) |
 | `PI_COMS_MAIN_PANE_WIDTH` | `60%` | width of the main (first role) pane in a tiled `team` / `role-team` |
+| `PI_COMS_CACHE_TTL_MS` | `300000` (5 min) | prompt-cache TTL used for the idle / `cache cold` marker in `coms_list` |
 
 ### Optional: zsh setup
 
@@ -130,9 +131,67 @@ pi -e extensions/coms.ts --cname dev --project myteam
 pi -e extensions/coms.ts --cname prod --project myteam   # in another terminal, maybe another machine via shared fs
 ```
 
-- **Tools**: `coms_list` (list peers), `coms_send` (send prompt to a peer, await its reply)
+- **Tools**: `coms_list` (list peers), `coms_send` (send prompt to a peer, await its reply), plus the respawn tools below
 - **TUI**: `/coms` opens the pool view with live status; `@agent` for direct interaction; Ctrl+O expands message details
 - Each agent keeps its own context window; messages carry sender, session id, hops, conversation id
+
+### Respawn and cold respawn
+
+Respawn replaces a session in-process - same pid, same TUI, fresh context - and the
+role identity is regenerated from the role file. Three ways in, differing only in
+who decides and whether the peer pays for a turn:
+
+| Tool | Who decides | Costs the peer a turn? |
+| --- | --- | --- |
+| `coms_respawn` | yourself | yes, a kickoff turn continues your work |
+| `coms_respawn` with `cold: true` | yourself | **no** - the note is stored, nothing is sent |
+| `coms_request_respawn` | you ask, peer chooses | yes, the peer wakes to consider it |
+| `coms_cold_respawn` | you decide for an idle peer | **no** - the peer never wakes |
+
+`coms_cold_respawn` exists because asking is not free. A respawn request is a
+message, a message is a turn, and that turn re-sends the entire stale context at
+uncached price purely to throw it away. So the cold path delivers no message and
+triggers no LLM call: the fresh session is seeded with your note as stored context
+and idles at zero API cost until real work arrives. Verified against a
+provider-request probe: boot 0 requests, one real turn 1 request, cold respawn
+still 1, and only prompting the fresh session made it 2.
+
+The peer gets no veto - a veto needs a turn, which is the cost being removed - so
+its interests are protected structurally instead. A peer that is running, blocked,
+or already respawning is **skipped, not errored**, and the ack says which:
+
+```
+coms_cold_respawn → builder: skipped (running), session left intact
+coms_cold_respawn → builder: queued, no turn fired
+```
+
+Always check the result rather than assuming it took effect.
+
+`coms_list` reports idle time per peer to tell you who is worth recycling, marking
+anyone past the cache TTL as `cache cold` - past that point the prompt cache is
+gone anyway, so respawning costs nothing in cache terms:
+
+```
+● @builder (claude-opus-5) 34% idle 12m (cache cold) — implements decisions
+● @scribe  (claude-opus-5) 8%  running                — owns the written record
+● @legacypeer (claude-opus-5) ?% idle ?               — peer on an older coms build
+```
+
+Idle time is read from the live peer where possible and the registry snapshot
+otherwise; a peer too old to report it shows `idle ?` rather than passing as
+freshly idle. Override the TTL with `PI_COMS_CACHE_TTL_MS`.
+
+**`coms_list` is not race-free.** Its `running` flag comes from a snapshot that
+can lag, and a peer has been observed reporting `is_running: false` while
+demonstrably mid-turn. Treat it as a hint for choosing who to recycle, never as
+proof a peer is idle - the receiver-side guardrail behind the ack is the only
+authoritative gate, which is exactly why the skip decision lives there and not in
+the caller.
+
+Combined with the session-hygiene rule coms adds to every agent's system prompt -
+one task per session, respawn while idle rather than after a prompt lands, finish
+in-flight work first - this keeps long-lived teams from dragging stale context
+between unrelated tasks.
 
 ## coms-net (network hub)
 

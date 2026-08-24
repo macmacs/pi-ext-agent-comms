@@ -138,6 +138,54 @@ just respawn-demo verify researcher "respawned for the smoke test"
 
 Smoke-tested end to end: old sid `01M0QY5RVMY2EB68QAC3FCWTBB` → new `01M0QY9WJHFPD3HQK5FM8TRM5K`, same pid, kickoff note landed as the fresh session's first message.
 
+### Cold respawn (no turn, no LLM call)
+
+The flow above costs the peer a turn: the request is a message, and answering it
+re-sends the whole stale context at uncached price only to discard it. Cold
+respawn removes that cost by removing the conversation. `coms_cold_respawn`
+decides rather than asks - the `respawn_cold` envelope delivers no message and
+triggers no turn, so step 1 above disappears and the receiving extension goes
+straight to step 2.
+
+How the turn is avoided, concretely: the queued `/coms-respawn` is consumed by the
+command handler during prompt-template expansion, so it never becomes a model
+request; and on the cold path the kickoff note is written into the fresh session
+with `appendMessage` (stored) instead of `sendUserMessage` (sent), with the
+`withSession` callback omitted entirely - any callback that sent a message would
+trigger the exact turn being avoided.
+
+Measured with a `before_provider_request` probe on an isolated pool: boot 0
+requests; one real turn 1; cold respawn still 1, the victim logging only
+`session_shutdown` then `session_start reason:new` with no `agent_start`; and 2
+only once the fresh session was actually prompted, where it quoted the seeded note
+as the first message in its context. First spend happens when real work arrives.
+
+Because the peer cannot veto (a veto needs a turn), the receiver enforces the
+guardrail before acking: running, blocked, or already-respawning peers are skipped
+and the ack carries `skipped: running|blocked|already_queued`. Verified by
+cold-respawning a peer mid multi-tool-call turn - `skipped (running)`, sid
+unchanged, and the peer's 6-request turn completed undisturbed.
+
+**The receiver-side check is the only authoritative gate.** During that test the
+registry reported `is_running: false` while the peer was provably mid-turn (five
+more provider requests followed). `coms_list` idle data is a hint for picking
+recycling candidates, not proof of idleness; never gate on it in caller logic.
+
+Idle tracking that feeds it: `last_turn_end_at` is stamped at `agent_end` (the
+moment the context stops changing, which is when the cache starts going cold),
+rides along on both the pong and the two heartbeat writers, and `coms_list` prefers
+the live pong over the registry snapshot. `idleMsSince` returns `null` - not `0` -
+when the value is missing or the peer is mid-turn, so a peer on an older coms build
+renders `idle ?` instead of masquerading as freshly idle. The registry version stays
+at `1`: optional-field tolerance is already the established pattern there.
+
+Self-respawn has the same option: `coms_respawn` with `cold: true` seeds the note
+and idles at zero cost, for use between tasks rather than mid-work. Session hygiene
+is pushed to every agent via a `before_agent_start` system-prompt block (returned
+per turn by chaining onto `event.systemPrompt`, so it cannot accumulate in the
+session), tailored so the orchestrator is told to recycle stale peers while the
+others are told to finish in-flight work first.
+
 ### Gotchas
 
 - **`expandPromptTemplates: true` is mandatory** on the queued follow-up. `pi.sendUserMessage()` defaults it to false, so `/coms-respawn` goes to the model as a literal prompt and `_tryExecuteExtensionCommand` is never called — the peer hallucinates a fresh session without any `newSession` happening. Both call sites in `coms.ts` (the `coms_respawn` tool and the waitForIdle re-queue path) pass it explicitly.

@@ -287,6 +287,14 @@ function isValidHex(hex: string): boolean {
   return /^#[0-9a-fA-F]{6}$/.test(hex);
 }
 
+/** 1234 -> "1.2k", 1_050_000 -> "1.0M". Used for the context token label. */
+function compactTokens(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "?";
+  if (n < 1000) return String(Math.round(n));
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
 function fallbackColor(sessionId: string): string {
   const h = crypto
     .createHash("sha256")
@@ -1776,7 +1784,8 @@ export default function (pi: ExtensionAPI) {
       };
       const leaderBindings = new Map<string, () => void>([["h", toggleWidget]]);
 
-      // Bottom-left: working spinner. Bottom-right: @name ─ model ─ ctx%.
+      // Bottom-left: working spinner.
+      // Bottom-right: @name ─ model ─ thinking ─ used/window tokens.
       host.registerSegment({
         owner: "coms",
         zone: "bottom_left",
@@ -1805,8 +1814,21 @@ export default function (pi: ExtensionAPI) {
         zone: "bottom_right",
         order: 2,
         get: () => {
-          const p = ctx.getContextUsage()?.percent;
-          return p != null ? `${Math.round(p)}%` : "?%";
+          if (!ctx.model?.reasoning) return null;
+          const level = ctx.thinkingLevel ?? "off";
+          return level === "off" ? null : level;
+        },
+      });
+      host.registerSegment({
+        owner: "coms",
+        zone: "bottom_right",
+        order: 3,
+        get: () => {
+          const usage = ctx.getContextUsage();
+          if (!usage) return null;
+          const used = usage.tokens != null ? compactTokens(usage.tokens) : "?";
+          const window = usage.contextWindow;
+          return window > 0 ? `${used}/${compactTokens(window)}` : used;
         },
       });
 

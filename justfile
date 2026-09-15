@@ -75,7 +75,9 @@ local-coms *args:
 # Launches in the CURRENT directory, so it inherits that project's .pi/ setup.
 # Joins the default pool unless you pass --team; any other args go through to pi.
 # A `model:` key in the role file's frontmatter becomes the default --model
-# (pi's `<provider>/<id>[:<thinking>]` syntax); an explicit --model still wins:
+# (pi's `<provider>/<id>[:<thinking>]` syntax); an explicit --model still wins.
+# roles/_common.md is appended second (shared style + roster + hard rules); the
+# role file stays FIRST so coms.ts reads identity frontmatter from it.
 #   just role orchestrator   # or: builder / researcher / secops-dev / scribe
 #   just role builder --team frontend
 #   just role builder --team frontend --model openrouter/x-ai/grok-5
@@ -83,8 +85,11 @@ local-coms *args:
 role name *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    case "{{name}}" in _*) echo "'{{name}}' is a shared fragment, not a role" >&2; exit 1 ;; esac
     role_file="{{repo}}/roles/{{name}}.md"
+    common_file="{{repo}}/roles/_common.md"
     test -f "$role_file" || { echo "role file $role_file not found" >&2; exit 1; }
+    test -f "$common_file" || { echo "shared role file $common_file not found" >&2; exit 1; }
     shift                      # drop the role name; leaves only pass-through args
     team="{{team_default}}"
     rest=()
@@ -106,6 +111,7 @@ role name *args:
     fi
     cd "{{here}}"
     exec pi --cname {{name}} --append-system-prompt "$role_file" \
+            --append-system-prompt "$common_file" \
             --project "$team" ${model:+--model "$model"} ${rest[@]+"${rest[@]}"}
 
 # Backoffice peer: pinned to the backoffice dir (its local RAG extension +
@@ -119,7 +125,9 @@ backoffice *args:
     #!/usr/bin/env bash
     set -euo pipefail
     role_file="{{repo}}/roles/backoffice.md"
+    common_file="{{repo}}/roles/_common.md"
     test -f "$role_file" || { echo "role file $role_file not found" >&2; exit 1; }
+    test -f "$common_file" || { echo "shared role file $common_file not found" >&2; exit 1; }
     test -d "{{backoffice_dir}}" || { echo "backoffice dir {{backoffice_dir}} not found (set PI_BACKOFFICE_DIR)" >&2; exit 1; }
     team="{{team_default}}"
     rest=()
@@ -141,6 +149,7 @@ backoffice *args:
     fi
     cd "{{backoffice_dir}}"
     exec pi --cname backoffice --append-system-prompt "$role_file" \
+            --append-system-prompt "$common_file" \
             --project "$team" ${model:+--model "$model"} ${rest[@]+"${rest[@]}"}
 
 # List coms pools (teams) and who is registered in each.

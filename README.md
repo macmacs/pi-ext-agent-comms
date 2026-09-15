@@ -388,10 +388,22 @@ before creating anything, so a typo fails fast with nothing spawned; dispatches
 `remain-on-exit failed` so a peer that dies on boot leaves its error on screen
 instead of vanishing.
 
-Roles live in `roles/<name>.md` (frontmatter sets name/description/color/model, body
-sets the teammate map): `orchestrator`, `builder`, `researcher`, `secops-dev`,
-`scribe`, `backoffice`. `just role <name>` launches any of them in your current
-directory.
+Roles live in `roles/<name>.md` (frontmatter sets name/description/color/model,
+body sets that role's own job): `orchestrator`, `builder`, `researcher`,
+`secops-dev`, `scribe`, `backoffice`. `just role <name>` launches any of them in
+your current directory.
+
+`roles/_common.md` is not a role. It holds what every role shares — writing
+style, the one-line team roster, and the hard rules (secrets never travel,
+backoffice data stays local). Both launchers append it as a **second**
+`--append-system-prompt`, after the role file: `coms.ts` reads identity
+frontmatter from the first `.md` it sees, so the ordering matters and
+`_common.md` deliberately has no frontmatter. Any `_`-prefixed file is rejected
+as a role name by `just role` and by `scripts/coms-team`.
+
+Respawn advice is **not** in the role files. `coms.ts` injects the session
+hygiene block into every peer's system prompt on each turn (see
+`sessionHygieneRule`), so duplicating it in a role file only wastes tokens.
 `just backoffice` is different — it **always** lands in the backoffice dir
 (`PI_BACKOFFICE_DIR`, default `~/repos/backoffice`) no matter where you invoke it,
 so it picks up that dir's local RAG extension and `AGENTS.md`. It takes `--team`

@@ -55,8 +55,14 @@ if [ -z "$dir" ] || [ ! -d "$dir" ]; then dir="$HOME"; fi
 
 # Validate every role up front and name every missing file, so a typo'd team
 # fails before any window exists instead of spawning broken peers.
+# roles/_common.md (and any other _-prefixed file) is a shared fragment appended
+# to every role by `just role`, not a launchable role, so it is rejected here and
+# hidden from the available list.
 missing=()
 for r in "$@"; do
+  case "$r" in
+    _*) echo "coms-team: '$r' is a shared fragment, not a role" >&2; exit 1 ;;
+  esac
   [ -f "$repo/roles/$r.md" ] || missing+=("$repo/roles/$r.md")
 done
 if [ ${#missing[@]} -gt 0 ]; then
@@ -65,7 +71,9 @@ if [ ${#missing[@]} -gt 0 ]; then
   avail=""
   for f in "$repo/roles"/*.md; do
     [ -e "$f" ] || continue
-    n="${f##*/}"; avail="$avail ${n%.md}"
+    n="${f##*/}"
+    case "$n" in _*) continue ;; esac
+    avail="$avail ${n%.md}"
   done
   echo "available:$avail" >&2
   exit 1

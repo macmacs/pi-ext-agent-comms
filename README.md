@@ -152,8 +152,27 @@ pi -e extensions/coms.ts --cname prod --project myteam   # in another terminal, 
 ```
 
 - **Tools**: `coms_list` (list peers), `coms_send` (send prompt to a peer, await its reply), plus the respawn tools below
-- **TUI**: `/coms` opens the pool view with live status; `@agent` for direct interaction; Ctrl+O expands message details
+- **TUI**: `/coms` opens the pool view with live status; `%agent` for direct interaction; Ctrl+O expands message details
 - Each agent keeps its own context window; messages carry sender, session id, hops, conversation id
+
+#### Why `%` and not `@`
+
+Peer mentions use `%`, not `@`. `@` is pi's built-in path completion, and an
+earlier build layered agents on top of it - which broke paths: `@src` fuzzy-matched
+the agent `scribe`, agents were listed first, and Enter inserted `@scribe` instead
+of the path. `%` has no meaning in paths, globs, shells or markdown, so the two
+never collide.
+
+```
+@src        -> src/ , src/foo.ts        pi built-in, untouched
+%           -> %oracle, %scribe, ...    all live peers, every pool
+%ora        -> %oracle
+100%done    -> nothing                  needs line start or whitespace before %
+%20         -> nothing                  same rule, so URL escapes stay quiet
+```
+
+`coms_send` and friends still accept a leading `@` on a target name for
+back-compat, so old transcripts keep working.
 
 ### Respawn and cold respawn
 
@@ -192,9 +211,9 @@ anyone past the cache TTL as `cache cold` - past that point the prompt cache is
 gone anyway, so respawning costs nothing in cache terms:
 
 ```
-● @builder (claude-opus-5) 34% idle 12m (cache cold) — implements decisions
-● @scribe  (claude-opus-5) 8%  running                — owns the written record
-● @legacypeer (claude-opus-5) ?% idle ?               — peer on an older coms build
+● %builder (claude-opus-5) 34% idle 12m (cache cold) — implements decisions
+● %scribe  (claude-opus-5) 8%  running                — owns the written record
+● %legacypeer (claude-opus-5) ?% idle ?               — peer on an older coms build
 ```
 
 Idle time is read from the live peer where possible and the registry snapshot

@@ -17,7 +17,7 @@
  *   const host = getEditorHost();
  *   const off = host.registerSegment({
  *     owner: "coms", zone: "bottom_right", order: 0,
- *     get: () => `@${name}`,
+ *     get: () => `%${name}`,
  *   });
  *   const offKeys = host.registerKeyHandler({
  *     owner: "coms", order: 0,

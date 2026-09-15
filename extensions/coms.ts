@@ -69,6 +69,17 @@ const IS_ROOT = !process.env.PI_PARENT_SESSION;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const LINE_CAP_BYTES = 64 * 1024;
 
+// Sigil that addresses a peer agent, e.g. `%oracle`. NOT `@`: that belongs to
+// pi's built-in path completion and stealing it broke `@some/path`. `%` has no
+// meaning in paths, globs, shells or markdown, so the two never collide.
+const PEER_SIGIL = "%";
+// Matches `%<token>` at line start or after whitespace only, so `100%done` and
+// URL escapes like `%20` never trigger the peer dropdown.
+const PEER_TOKEN = /(?:^|\s)%([^\s%]*)$/;
+// Leading sigil the tools tolerate on a target name. `@` stays accepted for
+// back-compat with older transcripts and habits.
+const PEER_SIGIL_PREFIX = /^[%@]/;
+
 const FALLBACK_PALETTE = [
   "#72F1B8",
   "#36F9F6",
@@ -1775,7 +1786,7 @@ export default function (pi: ExtensionAPI) {
         if (!identity || !currentCtx?.hasUI) return;
         const extra = extraProjects.filter((p) => p !== identity!.project);
         const suffix = extra.length > 0 ? ` [${extra.join(", ")}]` : "";
-        const base = `@${identity.name}${suffix}`;
+        const base = `${PEER_SIGIL}${identity.name}${suffix}`;
         try {
           currentCtx.ui.setStatus("coms", active ? `${base} [C-x]` : base);
         } catch {
@@ -1801,7 +1812,7 @@ export default function (pi: ExtensionAPI) {
         owner: "coms",
         zone: "bottom_right",
         order: 0,
-        get: () => `@${agentLabel()}`,
+        get: () => `${PEER_SIGIL}${agentLabel()}`,
       });
       host.registerSegment({
         owner: "coms",
@@ -1899,16 +1910,22 @@ export default function (pi: ExtensionAPI) {
         },
       });
 
-      ctx.ui.setStatus("coms", `@${name}${poolSuffix}`);
+      ctx.ui.setStatus("coms", `${PEER_SIGIL}${name}${poolSuffix}`);
 
-      // @-mention completion for peer agents across ALL pools.
-      // Layers on top of the built-in @ file provider: matches @<token>,
-      // merges live agent suggestions with file suggestions under the same prefix.
-      const AT_TOKEN = /(?:^|\s)@([^\s@]*)$/;
+      // %-mention completion for peer agents across ALL pools.
+      //
+      // Deliberately NOT layered on `@`: `@` belongs to pi's built-in path
+      // completion and hijacking it made short path tokens unusable (`@src`
+      // fuzzy-matched the agent `scribe` and won the pre-selection). `%` has no
+      // meaning in paths, globs, shells or markdown, so the two never collide.
+      //
+      // Only fires at line start or after whitespace, so `100%done` and URL
+      // escapes like `%20` stay quiet.
       ctx.ui.addAutocompleteProvider((current: AutocompleteProvider) => ({
+        triggerCharacters: [PEER_SIGIL],
         async getSuggestions(lines, cursorLine, cursorCol, options) {
           const line = lines[cursorLine] ?? "";
-          const m = line.slice(0, cursorCol).match(AT_TOKEN);
+          const m = line.slice(0, cursorCol).match(PEER_TOKEN);
           if (!m)
             return current.getSuggestions(
               lines,
@@ -1950,28 +1967,33 @@ export default function (pi: ExtensionAPI) {
           const agentItems: AutocompleteItem[] = matched
             .slice(0, 20)
             .map((e) => ({
-              value: `@${e.name}`,
-              label: `@${e.name}`,
+              value: `${PEER_SIGIL}${e.name}`,
+              label: `${PEER_SIGIL}${e.name}`,
               description: `${relIcon(e.name)} ${prettyPath(e.cwd)}${e.purpose ? ` · ${e.purpose}` : ""}`,
             }));
 
-          const base = await current.getSuggestions(
-            lines,
-            cursorLine,
-            cursorCol,
-            options,
-          );
-          if (options.signal.aborted) return base;
-          if (base && base.prefix === `@${token}`) {
-            return {
-              prefix: base.prefix,
-              items: [...agentItems, ...base.items],
-            };
-          }
-          if (agentItems.length === 0) return base;
-          return { prefix: `@${token}`, items: agentItems };
+          if (options.signal.aborted || agentItems.length === 0) return null;
+          return { prefix: `${PEER_SIGIL}${token}`, items: agentItems };
         },
         applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+          // Own insertion for peer mentions: the built-in path logic would not
+          // append the trailing space, and it must never see a `%` prefix.
+          if (prefix.startsWith(PEER_SIGIL)) {
+            const currentLine = lines[cursorLine] ?? "";
+            const before = currentLine.slice(0, cursorCol - prefix.length);
+            const after = currentLine.slice(cursorCol);
+            // Add a separating space only if the text after the cursor does not
+            // already start with one, so completing mid-sentence does not
+            // produce "%oracle  about it".
+            const gap = /^\s/.test(after) ? "" : " ";
+            const nextLines = [...lines];
+            nextLines[cursorLine] = `${before}${item.value}${gap}${after}`;
+            return {
+              lines: nextLines,
+              cursorLine,
+              cursorCol: before.length + item.value.length + gap.length,
+            };
+          }
           return current.applyCompletion(
             lines,
             cursorLine,
@@ -2790,9 +2812,10 @@ export default function (pi: ExtensionAPI) {
   }
 
   function resolveTarget(target: string): RegistryEntry | null {
-    // Tolerate a leading @ — the mention UI and coms_list surface names as
-    // "@name", and models tend to pass that form straight into target.
-    target = target.replace(/^@/, "");
+    // Tolerate a leading sigil — the mention UI and coms_list surface names as
+    // "%name", and models tend to pass that form straight into target. "@name"
+    // stays accepted for back-compat.
+    target = target.replace(PEER_SIGIL_PREFIX, "");
     // Search display pools first (own-name + extra).
     const displayEntries = readAllDisplayEntries();
     const byName = displayEntries.find((e) => e.name === target);
@@ -2903,7 +2926,7 @@ export default function (pi: ExtensionAPI) {
                   : a.blocked
                     ? " blocked"
                     : ` idle ${formatIdle(a.idle_ms)}${a.cache_cold ? " (cache cold)" : ""}`;
-                return `${live} @${a.name} (${a.model})${ctxStr}${state}${a.purpose ? ` — ${a.purpose}` : ""}`;
+                return `${live} ${PEER_SIGIL}${a.name} (${a.model})${ctxStr}${state}${a.purpose ? ` — ${a.purpose}` : ""}`;
               })
               .join("\n");
 
@@ -2949,7 +2972,7 @@ export default function (pi: ExtensionAPI) {
                   a.cache_cold ? "warning" : "dim",
                   `idle ${formatIdle(a.idle_ms ?? null)}`,
                 );
-          return `${dot} ${theme.fg("accent", `@${a.name}`)} ${theme.fg("dim", a.model)} ${theme.fg("warning", pct)} ${state}`;
+          return `${dot} ${theme.fg("accent", `${PEER_SIGIL}${a.name}`)} ${theme.fg("dim", a.model)} ${theme.fg("warning", pct)} ${state}`;
         })
         .join("\n");
       return new Text(header + "\n" + rows, 0, 0);
@@ -3634,7 +3657,10 @@ export default function (pi: ExtensionAPI) {
         try {
           const extra = extraProjects.filter((p) => p !== identity?.project);
           const suffix = extra.length > 0 ? ` [${extra.join(", ")}]` : "";
-          ctx.ui.setStatus("coms", `@${identity?.name ?? ""}${suffix}`);
+          ctx.ui.setStatus(
+            "coms",
+            `${PEER_SIGIL}${identity?.name ?? ""}${suffix}`,
+          );
           ctx.ui.notify(
             `coms: joined project ${p} · pools: ${allProjects().join(", ")}`,
             "info",

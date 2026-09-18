@@ -19,6 +19,20 @@ backoffice_dir := env_var_or_default("PI_BACKOFFICE_DIR", home_directory() / "re
 # globally with PI_COMS_TEAM to run several independent teams side by side.
 team_default := env_var_or_default("PI_COMS_TEAM", "team")
 
+# Tools every role gets, no matter what. Everything else is opt-in per role via
+# a `tools:` key in the role frontmatter (see the `role` recipe).
+#
+# Why an allowlist at all: tool schemas are ~72% of what ships to the model on
+# every turn. A full install here is 38 tools = 66,485 chars of schema plus
+# ~13,300 chars of matching guideline text inside the system prompt, so a peer
+# pays ~23,000 tokens before it reads a word of your prompt. Excluding a tool
+# drops BOTH its schema and its guidelines. Measured: a builder on this core set
+# plus two extras costs ~9,700 tokens instead of ~23,000.
+#
+# Keep this list boring: file edits, shell, task tracking, asking the human, and
+# talking to peers. A role that needs web, tickets or a sandbox says so itself.
+tools_core := "read,bash,edit,write,todo,ask_user_question,coms_send,coms_list,coms_respawn,coms_cold_respawn,coms_request_respawn,ctx_search"
+
 default:
     @just --list
 
@@ -81,6 +95,16 @@ local-coms *args:
 # roles/_common.md as ONE block at the very END of the system prompt, after
 # pi's AGENTS.md context files and skill list, so the style rule wins on
 # recency instead of being buried mid-prompt.
+#
+# Tool budget comes from the frontmatter too, and is opt-in per role:
+#   (no key)                  -> no tool flags at all, every installed tool loads
+#   tools: none               -> `--tools {{tools_core}}`
+#   tools: jira,confluence    -> `--tools {{tools_core}},jira,confluence`
+#   exclude_tools: a,b        -> `--exclude-tools a,b` (wins over `tools:`)
+# Use no spaces in those lists. `--tools` is a STRICT allowlist over ALL tools,
+# so a role launched in a project whose .pi/ adds its own tools must name them
+# (that is why roles/backoffice.md lists rag_*), or use `exclude_tools:` instead.
+# Your own -t / --tools / -xt / --exclude-tools on the command line wins outright.
 #   just role orchestrator   # or: builder / researcher / secops-dev / scribe
 #   just role builder --team frontend
 #   just role builder --team frontend --model openrouter/x-ai/grok-5
@@ -100,12 +124,15 @@ role name *args:
     team="{{team_default}}"
     rest=()
     has_model=0
+    has_tools=0
     while [ $# -gt 0 ]; do
       case "$1" in
         --team)   shift; [ $# -gt 0 ] || { echo "--team needs a value" >&2; exit 1; }; team="$1" ;;
         --team=*) team="${1#--team=}" ;;
         --model|--model=*|--provider|--provider=*)
                   has_model=1; rest+=("$1") ;;
+        -t|--tools|-t=*|--tools=*|-xt|--exclude-tools|-xt=*|--exclude-tools=*)
+                  has_tools=1; rest+=("$1") ;;
         *)        rest+=("$1") ;;
       esac
       shift
@@ -115,9 +142,22 @@ role name *args:
     if [ "$has_model" = 0 ]; then
       model="$("{{repo}}/scripts/role-field" "$role_file" model)"
     fi
+    tools=()
+    if [ "$has_tools" = 0 ]; then
+      xt="$("{{repo}}/scripts/role-field" "$role_file" exclude_tools)"
+      allow="$("{{repo}}/scripts/role-field" "$role_file" tools)"
+      if [ -n "$xt" ]; then
+        tools=(--exclude-tools "$xt")
+      elif [ "$allow" = none ]; then
+        tools=(--tools "{{tools_core}}")
+      elif [ -n "$allow" ]; then
+        tools=(--tools "{{tools_core}},$allow")
+      fi
+    fi
     cd "{{here}}"
     exec pi --cname {{name}} --role "$role_file" \
-            --project "$team" ${model:+--model "$model"} ${rest[@]+"${rest[@]}"}
+            --project "$team" ${model:+--model "$model"} \
+            ${tools[@]+"${tools[@]}"} ${rest[@]+"${rest[@]}"}
 
 # Backoffice peer: pinned to the backoffice dir (its local RAG extension +
 # AGENTS.md) with the backoffice role identity replayed across respawn.
@@ -137,12 +177,15 @@ backoffice *args:
     team="{{team_default}}"
     rest=()
     has_model=0
+    has_tools=0
     while [ $# -gt 0 ]; do
       case "$1" in
         --team)   shift; [ $# -gt 0 ] || { echo "--team needs a value" >&2; exit 1; }; team="$1" ;;
         --team=*) team="${1#--team=}" ;;
         --model|--model=*|--provider|--provider=*)
                   has_model=1; rest+=("$1") ;;
+        -t|--tools|-t=*|--tools=*|-xt|--exclude-tools|-xt=*|--exclude-tools=*)
+                  has_tools=1; rest+=("$1") ;;
         *)        rest+=("$1") ;;
       esac
       shift
@@ -152,9 +195,22 @@ backoffice *args:
     if [ "$has_model" = 0 ]; then
       model="$("{{repo}}/scripts/role-field" "$role_file" model)"
     fi
+    tools=()
+    if [ "$has_tools" = 0 ]; then
+      xt="$("{{repo}}/scripts/role-field" "$role_file" exclude_tools)"
+      allow="$("{{repo}}/scripts/role-field" "$role_file" tools)"
+      if [ -n "$xt" ]; then
+        tools=(--exclude-tools "$xt")
+      elif [ "$allow" = none ]; then
+        tools=(--tools "{{tools_core}}")
+      elif [ -n "$allow" ]; then
+        tools=(--tools "{{tools_core}},$allow")
+      fi
+    fi
     cd "{{backoffice_dir}}"
     exec pi --cname backoffice --role "$role_file" \
-            --project "$team" ${model:+--model "$model"} ${rest[@]+"${rest[@]}"}
+            --project "$team" ${model:+--model "$model"} \
+            ${tools[@]+"${tools[@]}"} ${rest[@]+"${rest[@]}"}
 
 # List coms pools (teams) and who is registered in each.
 #   just teams

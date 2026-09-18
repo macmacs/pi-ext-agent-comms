@@ -407,10 +407,60 @@ before creating anything, so a typo fails fast with nothing spawned; dispatches
 `remain-on-exit failed` so a peer that dies on boot leaves its error on screen
 instead of vanishing.
 
-Roles live in `roles/<name>.md` (frontmatter sets name/description/color/model,
+Roles live in `roles/<name>.md` (frontmatter sets name/description/color/model/tools,
 body sets that role's own job): `orchestrator`, `builder`, `researcher`,
 `secops-dev`, `scribe`, `backoffice`. `just role <name>` launches any of them in
 your current directory.
+
+### Per-role tool budgets (`tools:`)
+
+Tool schemas, not prose, are what make an agent's prompt big. A full install
+here is 38 tools = 66,485 chars of JSON schema, plus ~13,300 chars of matching
+guideline text that pi writes into the system prompt for those same tools. That
+is ~22,400 tokens shipped on every turn before the agent reads your prompt.
+
+So each role declares what it actually needs. `just role` reads the frontmatter
+and turns it into pi's `--tools` allowlist on top of the shared `tools_core` set
+in the justfile:
+
+| key in frontmatter | what `just role` passes |
+|---|---|
+| *(absent)* | nothing - every installed tool loads (back-compat) |
+| `tools: none` | `--tools <tools_core>` |
+| `tools: jira,confluence` | `--tools <tools_core>,jira,confluence` |
+| `exclude_tools: a,b` | `--exclude-tools a,b` (wins over `tools:`) |
+
+No spaces in those lists. Your own `-t` / `--tools` / `-xt` /
+`--exclude-tools` on the command line wins outright and suppresses all of this.
+
+Measured, same machine, same 38-tool install:
+
+| role | payload | tokens | vs 89,605 |
+|---|---|---|---|
+| `secops-dev` | 30,907 | ~7,700 | **-66%** |
+| `builder` | 38,917 | ~9,700 | **-58%** |
+| `scribe` | 45,069 | ~11,300 | -50% |
+| `orchestrator` | 45,154 | ~11,300 | -50% |
+| `researcher` | 55,485 | ~13,900 | -38% |
+
+Why each role gets what it gets:
+
+- **builder** adds `ctx_execute`, `ctx_execute_file` - it is the role that chews
+  through build logs, and those keep the bytes out of its context.
+- **researcher** owns the whole `aio-*` web stack. Nobody else carries 16k chars
+  of web schema; they ask researcher instead. This is why `builder.md` says "ask
+  researcher before you guess at an API" - the role file and the tool budget say
+  the same thing.
+- **orchestrator** and **scribe** get `jira` + `confluence`. Note those two cost
+  ~6,600 chars of *system prompt guidelines* on top of their 7,665 chars of
+  schema, which is why they are the two heaviest non-researcher roles.
+- **secops-dev** gets `tools: none` - core set only. This is a containment
+  boundary first and a token saving second: no web, no tickets, no wiki, no
+  remote indexer can ship a secret off the machine.
+- **backoffice** must name `rag_index,rag_query,rag_status` because `--tools` is
+  a strict allowlist over **all** tools, project extensions included. A role
+  launched in a project whose `.pi/` adds tools has to name them, or use
+  `exclude_tools:` instead.
 
 `roles/_common.md` is not a role. It holds what every role shares — writing
 style, the one-line team roster, and the hard rules (secrets never travel,

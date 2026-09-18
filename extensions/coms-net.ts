@@ -251,29 +251,33 @@ function abbreviateModel(model: string): string {
 	return m;
 }
 
-function findSystemPromptPath(argv: string[]): string | null {
+function findRoleFilePath(argv: string[]): string | null {
+	// --role is the supported way (coms owns the file and injects its body at the
+	// tail of the system prompt). The prompt flags stay as a fallback for older
+	// launchers. Mirrors findRoleFilePath in coms.ts.
 	const scan = (flag: string): string | null => {
 		for (let i = 0; i < argv.length; i++) {
-			if (argv[i] === flag && i + 1 < argv.length) {
-				const candidate = argv[i + 1];
-				if (candidate.endsWith(".md")) {
-					try {
-						if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-							return candidate;
-						}
-					} catch {
-						// fall through
-					}
+			const hit =
+				argv[i] === flag && i + 1 < argv.length
+					? argv[i + 1]
+					: argv[i].startsWith(`${flag}=`)
+						? argv[i].slice(flag.length + 1)
+						: null;
+			if (hit && hit.endsWith(".md")) {
+				try {
+					if (fs.existsSync(hit) && fs.statSync(hit).isFile()) return hit;
+				} catch {
+					// fall through
 				}
 			}
 		}
 		return null;
 	};
-	return scan("--system-prompt") ?? scan("--append-system-prompt");
+	return scan("--role") ?? scan("--system-prompt") ?? scan("--append-system-prompt");
 }
 
 function readFrontmatterFromArgv(argv: string[]): { name?: string; description?: string; color?: string } {
-	const p = findSystemPromptPath(argv);
+	const p = findRoleFilePath(argv);
 	if (!p) return {};
 	try {
 		const raw = fs.readFileSync(p, "utf-8");
@@ -374,6 +378,12 @@ export default function (pi: ExtensionAPI) {
 	// Agent name flag is `--cname`: pi's harness owns `--name` and resumes it.
 	pi.registerFlag("cname", {
 		description: "Override coms-net agent name (otherwise from frontmatter or auto-generated). Distinct from pi's own --name, which the harness owns and resumes.",
+		type: "string",
+		default: undefined,
+	});
+	pi.registerFlag("role", {
+		description:
+			"Path to a role .md file; identity is read from its frontmatter (see coms.ts --role)",
 		type: "string",
 		default: undefined,
 	});

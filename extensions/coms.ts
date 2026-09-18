@@ -724,30 +724,41 @@ function sendEnvelope(
   });
 }
 
-// ━━ System-prompt frontmatter scan ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ━━ Role file discovery ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-function findSystemPromptPath(argv: string[]): string | null {
-  // Prefer --system-prompt (overwrite). Fall back to --append-system-prompt.
-  // These flags are pi-builtin (not extension-registered) so we still scan
-  // argv directly. First match wins per preference order.
+function findRoleFilePath(argv: string[]): string | null {
+  // --role is the supported way in: coms owns the file end to end, reads the
+  // frontmatter for identity, and injects the body itself at the TAIL of the
+  // system prompt (see buildComsPrompt). --system-prompt and
+  // --append-system-prompt are kept as a fallback for older launchers, but they
+  // put the role text in the MIDDLE of the prompt, where everything pi appends
+  // afterwards (AGENTS.md, skills, cwd) outranks it by recency.
   const scan = (flag: string): string | null => {
     for (let i = 0; i < argv.length; i++) {
-      if (argv[i] === flag && i + 1 < argv.length) {
-        const candidate = argv[i + 1];
-        if (candidate.endsWith(".md")) {
-          try {
-            if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-              return candidate;
-            }
-          } catch {
-            // fall through
-          }
+      const hit =
+        argv[i] === flag && i + 1 < argv.length
+          ? argv[i + 1]
+          : argv[i].startsWith(`${flag}=`)
+            ? argv[i].slice(flag.length + 1)
+            : null;
+      if (hit && hit.endsWith(".md")) {
+        try {
+          if (fs.existsSync(hit) && fs.statSync(hit).isFile()) return hit;
+        } catch {
+          // fall through
         }
       }
     }
     return null;
   };
-  return scan("--system-prompt") ?? scan("--append-system-prompt");
+  return (
+    scan("--role") ?? scan("--system-prompt") ?? scan("--append-system-prompt")
+  );
+}
+
+/** True when the role file arrived via --role, so coms owns injecting its body. */
+function roleFileIsComsOwned(argv: string[]): boolean {
+  return argv.some((a) => a === "--role" || a.startsWith("--role="));
 }
 
 function readFrontmatterFromArgv(argv: string[]): {
@@ -755,7 +766,7 @@ function readFrontmatterFromArgv(argv: string[]): {
   description?: string;
   color?: string;
 } {
-  const p = findSystemPromptPath(argv);
+  const p = findRoleFilePath(argv);
   if (!p) return {};
   try {
     const raw = fs.readFileSync(p, "utf-8");
@@ -764,6 +775,35 @@ function readFrontmatterFromArgv(argv: string[]): {
   } catch {
     return {};
   }
+}
+
+/**
+ * Role identity + shared team rules, read once at session start.
+ *
+ * `_common.md` is looked up as a sibling of the role file rather than passed as
+ * a second --append-system-prompt: two appends land the style rule mid-prompt
+ * and split it across two blocks, and pi joins them ahead of the AGENTS.md
+ * context files that repeat the same rule in different words.
+ */
+function readRoleParts(argv: string[]): { body: string; common: string } {
+  const p = findRoleFilePath(argv);
+  if (!p || !roleFileIsComsOwned(argv)) return { body: "", common: "" };
+  let body = "";
+  let common = "";
+  try {
+    body = parseFrontmatter(fs.readFileSync(p, "utf-8")).body.trim();
+  } catch {
+    /* role file unreadable — fall back to hygiene-only prompt */
+  }
+  try {
+    const sibling = path.join(path.dirname(p), "_common.md");
+    if (fs.existsSync(sibling)) {
+      common = parseFrontmatter(fs.readFileSync(sibling, "utf-8")).body.trim();
+    }
+  } catch {
+    /* no shared rules — role body alone is still valid */
+  }
+  return { body, common };
 }
 
 // ━━ Default export ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -776,6 +816,12 @@ export default function (pi: ExtensionAPI) {
   pi.registerFlag("cname", {
     description:
       "Override coms agent name (otherwise from frontmatter or auto-generated). Distinct from pi's own --name, which the harness owns and resumes.",
+    type: "string",
+    default: undefined,
+  });
+  pi.registerFlag("role", {
+    description:
+      "Path to a role .md file. coms reads identity from its frontmatter and injects its body (plus a sibling _common.md) at the END of the system prompt. Prefer this over --append-system-prompt, which lands the role text mid-prompt.",
     type: "string",
     default: undefined,
   });
@@ -3438,18 +3484,33 @@ export default function (pi: ExtensionAPI) {
 
   // (agent_end auto-reply removed — agents decide whether to reply via coms_send)
 
-  // ━━ Session hygiene rule (system prompt) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // Lives in the extension rather than an AGENTS.md so it travels with coms to
-  // every agent on the machine, and so the orchestrator-only line can be
-  // tailored from the role identity we already hold. Returned from
-  // before_agent_start, which chains per turn and is NOT stored in the session,
-  // so it cannot accumulate across turns the way an injected message would.
+  // ━━ The coms prompt (single tail block) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // ONE block, appended LAST, holding everything that defines this agent: who
+  // it is, how it writes, who its teammates are, and how it manages its own
+  // session.
+  //
+  // Why a single tail block and not --append-system-prompt files:
+  //   pi assembles the prompt as base + tool guidelines + appendSystemPrompt +
+  //   AGENTS.md context files + skills + cwd. Anything passed with
+  //   --append-system-prompt therefore sits in the MIDDLE, outranked by recency
+  //   by ~5k chars of AGENTS.md and skill listings that follow it, and dwarfed
+  //   by ~13k chars of dense tool guidelines ahead of it. Splitting identity
+  //   and shared rules across two appends made it two soft hints instead of one
+  //   rule. before_agent_start runs after the whole prompt is built, so what we
+  //   return here is genuinely last.
+  //
+  // Returned from before_agent_start, which chains per turn and is NOT stored
+  // in the session, so it cannot accumulate across turns the way an injected
+  // message would.
   const CACHE_TTL_MIN = Math.round(CACHE_TTL_MS / 60_000);
+  // Read once per session, not once per turn: the role file does not change
+  // under a live agent, and a per-turn read would be disk I/O on the hot path.
+  const roleParts = readRoleParts(process.argv);
 
-  function sessionHygieneRule(): string {
+  function sessionHygieneSection(): string {
     const isOrchestrator = /orchestrator/i.test(identity?.name ?? "");
     const lines = [
-      "## Session hygiene (coms)",
+      "## Session hygiene",
       "",
       "- One task per session. Do not carry a session across unrelated tasks.",
       `- The prompt cache TTL is ${CACHE_TTL_MIN} minutes. A session idle much longer than that has a cold cache already, so there is nothing left to preserve.`,
@@ -3468,6 +3529,25 @@ export default function (pi: ExtensionAPI) {
     return lines.join("\n");
   }
 
+  function buildComsPrompt(): string {
+    const name = identity?.name ?? "this agent";
+    const sections = [
+      "# You are a coms agent",
+      "",
+      "Everything below overrides anything above it that conflicts with it,",
+      "including the tool guidelines and the project context files. The tool",
+      "guidelines tell you HOW to call a tool; they are not an example of how to",
+      "write. Write the way this section says, every time, to the human and to",
+      "your teammates.",
+      "",
+      `Your name in this team is \`${name}\`.`,
+    ];
+    if (roleParts.body) sections.push("", "## Your role", "", roleParts.body);
+    if (roleParts.common) sections.push("", roleParts.common);
+    sections.push("", sessionHygieneSection());
+    return sections.join("\n");
+  }
+
   pi.on("before_agent_start", async (event, ctx) => {
     if (!identity) return;
     if (ctx.hasUI) {
@@ -3480,7 +3560,7 @@ export default function (pi: ExtensionAPI) {
     // Chain onto the prompt as it stands for this handler, so other extensions'
     // changes are preserved.
     return {
-      systemPrompt: `${event.systemPrompt}\n\n${sessionHygieneRule()}`,
+      systemPrompt: `${event.systemPrompt}\n\n${buildComsPrompt()}`,
     };
   });
 

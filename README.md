@@ -462,6 +462,38 @@ Why each role gets what it gets:
   launched in a project whose `.pi/` adds tools has to name them, or use
   `exclude_tools:` instead.
 
+### `just lean` - the same trick for your own session
+
+Role peers get an allowlist because their job is fixed. Your own interactive
+session lands in arbitrary projects, so `just lean` uses a **deny**list instead -
+`-xt` only removes what is named, so tools a project's `.pi/` registers still
+show up:
+
+```bash
+just lean                                  # or: just -g lean
+just lean --model litellm/claude-sonnet-4-6
+PI_LEAN_EXCLUDE="mcp,mcpScript" just lean  # tune without editing the justfile
+```
+
+Dropped by default: context-mode's five diagnostics (run those from the CLI when
+something is actually broken), the six `aio-*` tools that only matter for
+whole-site crawls, and the `mcp` gateway pair. Kept: `ctx_batch_execute`,
+`ctx_execute`, `ctx_execute_file`, `ctx_search`, `ctx_index`,
+`ctx_fetch_and_index`, `aio-websearch`, `aio-webfetch`, `jira`, `confluence`,
+`coms_*`, built-ins.
+
+Measured -23% (8 tools, 13,827 chars). That figure is a floor: it was taken in
+`pi -p` print mode, which does not register context-mode's tools at all, so the
+five `ctx_*` diagnostics were not there to remove. In a real interactive session
+the saving is ~3,900 chars larger.
+
+> **Measuring this yourself:** hook `before_provider_request` and read
+> `event.payload`. The system prompt is `payload.system` (Anthropic) or the
+> `system`/`developer` entries of `payload.input` (OpenAI Responses API), and
+> per-tool cost is `JSON.stringify(tool).length` over `payload.tools`. Print mode
+> is convenient but under-reports: `ask_user_question` and all `ctx_*` tools are
+> missing from it.
+
 `roles/_common.md` is not a role. It holds what every role shares — writing
 style, the one-line team roster, and the hard rules (secrets never travel,
 backoffice data stays local). It is **not** passed on the command line: `coms.ts`

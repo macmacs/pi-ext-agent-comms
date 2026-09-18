@@ -33,6 +33,11 @@ team_default := env_var_or_default("PI_COMS_TEAM", "team")
 # talking to peers. A role that needs web, tickets or a sandbox says so itself.
 tools_core := "read,bash,edit,write,todo,ask_user_question,coms_send,coms_list,coms_respawn,coms_cold_respawn,coms_request_respawn,ctx_search"
 
+# Denylist for `just lean` (your own session, not a role peer). Override with
+# PI_LEAN_EXCLUDE to tune it without editing this file. See the `lean` recipe for
+# what is deliberately KEPT.
+lean_exclude := env_var_or_default("PI_LEAN_EXCLUDE", "ctx_purge,ctx_doctor,ctx_stats,ctx_upgrade,ctx_insight,aio-webpull,aio-webquery,aio-webmap,aio-webresearch,aio-webresult,aio-webcontent,mcp,mcpScript")
+
 default:
     @just --list
 
@@ -84,6 +89,30 @@ typecheck:
 [doc("Plain local peer in the current dir (args go straight to pi)")]
 local-coms *args:
     cd "{{here}}" && pi {{args}}
+
+# Your own session, minus the tools you almost never call by hand.
+#
+# Unlike a role peer this is a DENYlist, not an allowlist: your interactive
+# session lands in arbitrary projects, and an allowlist would silently swallow
+# whatever tools that project's .pi/ registers. `-xt` only removes what is named
+# here, so anything new still shows up.
+#
+# Kept on purpose, because these are the ones worth reaching for:
+#   ctx_batch_execute, ctx_execute, ctx_execute_file, ctx_search  (think-in-code)
+#   ctx_index, ctx_fetch_and_index                                (build the KB)
+#   aio-websearch, aio-webfetch                                   (search, read)
+#   jira, confluence, coms_*, and the built-ins
+#
+# Dropped: context-mode's diagnostics (you run those from the CLI when something
+# is actually broken), the six webaio tools that only matter for whole-site
+# crawls, and the MCP gateway pair.
+#
+#   just lean                     # or: just -g lean
+#   just lean --model litellm/claude-sonnet-4-6
+#   PI_LEAN_EXCLUDE="mcp,mcpScript" just lean      # tune it without editing here
+[doc("pi in the current dir with the rarely-used tools excluded")]
+lean *args:
+    @cd "{{here}}" && exec pi --exclude-tools "{{lean_exclude}}" {{args}}
 
 # Role-file peer (identity from roles/<name>.md; replays across respawn).
 # Launches in the CURRENT directory, so it inherits that project's .pi/ setup.

@@ -76,8 +76,11 @@ local-coms *args:
 # Joins the default pool unless you pass --team; any other args go through to pi.
 # A `model:` key in the role file's frontmatter becomes the default --model
 # (pi's `<provider>/<id>[:<thinking>]` syntax); an explicit --model still wins.
-# roles/_common.md is appended second (shared style + roster + hard rules); the
-# role file stays FIRST so coms.ts reads identity frontmatter from it.
+# The role file goes in via coms' own --role, NOT --append-system-prompt: coms
+# reads identity from the frontmatter and injects the body plus the sibling
+# roles/_common.md as ONE block at the very END of the system prompt, after
+# pi's AGENTS.md context files and skill list, so the style rule wins on
+# recency instead of being buried mid-prompt.
 #   just role orchestrator   # or: builder / researcher / secops-dev / scribe
 #   just role builder --team frontend
 #   just role builder --team frontend --model openrouter/x-ai/grok-5
@@ -91,6 +94,9 @@ role name *args:
     test -f "$role_file" || { echo "role file $role_file not found" >&2; exit 1; }
     test -f "$common_file" || { echo "shared role file $common_file not found" >&2; exit 1; }
     shift                      # drop the role name; leaves only pass-through args
+    # $common_file is not passed on the command line: coms finds it as a sibling
+    # of $role_file. It is checked here so a missing shared file fails loudly at
+    # launch instead of silently dropping the team rules from the prompt.
     team="{{team_default}}"
     rest=()
     has_model=0
@@ -110,8 +116,7 @@ role name *args:
       model="$("{{repo}}/scripts/role-field" "$role_file" model)"
     fi
     cd "{{here}}"
-    exec pi --cname {{name}} --append-system-prompt "$role_file" \
-            --append-system-prompt "$common_file" \
+    exec pi --cname {{name}} --role "$role_file" \
             --project "$team" ${model:+--model "$model"} ${rest[@]+"${rest[@]}"}
 
 # Backoffice peer: pinned to the backoffice dir (its local RAG extension +
@@ -148,8 +153,7 @@ backoffice *args:
       model="$("{{repo}}/scripts/role-field" "$role_file" model)"
     fi
     cd "{{backoffice_dir}}"
-    exec pi --cname backoffice --append-system-prompt "$role_file" \
-            --append-system-prompt "$common_file" \
+    exec pi --cname backoffice --role "$role_file" \
             --project "$team" ${model:+--model "$model"} ${rest[@]+"${rest[@]}"}
 
 # List coms pools (teams) and who is registered in each.

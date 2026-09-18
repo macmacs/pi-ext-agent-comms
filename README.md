@@ -414,15 +414,53 @@ your current directory.
 
 `roles/_common.md` is not a role. It holds what every role shares — writing
 style, the one-line team roster, and the hard rules (secrets never travel,
-backoffice data stays local). Both launchers append it as a **second**
-`--append-system-prompt`, after the role file: `coms.ts` reads identity
-frontmatter from the first `.md` it sees, so the ordering matters and
-`_common.md` deliberately has no frontmatter. Any `_`-prefixed file is rejected
-as a role name by `just role` and by `scripts/coms-team`.
+backoffice data stays local). It is **not** passed on the command line: `coms.ts`
+finds it as a sibling of the role file. It has no frontmatter, and any
+`_`-prefixed file is rejected as a role name by `just role` and by
+`scripts/coms-team`.
 
-Respawn advice is **not** in the role files. `coms.ts` injects the session
-hygiene block into every peer's system prompt on each turn (see
-`sessionHygieneRule`), so duplicating it in a role file only wastes tokens.
+Respawn advice is **not** in the role files either. `coms.ts` generates the
+session hygiene block, and tailors it per role (the orchestrator gets the
+cold-respawn-your-peers line, everyone else gets the respawn-yourself lines), so
+duplicating it in a role file only wastes tokens.
+
+### One prompt block, appended last (`--role`)
+
+Both launchers pass the role file with coms' own `--role` flag, **not**
+`--append-system-prompt`. `coms.ts` then assembles ONE block - identity, role
+body, team rules, session hygiene - and returns it from `before_agent_start`, so
+it lands at the very **end** of the system prompt.
+
+This matters because of how pi builds the prompt:
+
+```
+base prompt + tool guidelines   ~15.7k chars   64%
+pi docs block                    ~1.2k
+appendSystemPrompt               <-- role text used to land HERE, mid-prompt
+<project_context> (AGENTS.md)    ~2.1k
+<available_skills>               ~3.1k
+cwd
+<-- before_agent_start output lands HERE, genuinely last
+```
+
+With `--append-system-prompt` the role was 2% of the prompt, buried behind ~13k
+chars of dense tool guidelines and outranked on recency by the ~5k chars of
+`AGENTS.md` and skill listings that pi appends after it. A writing-style rule
+stated there loses to a project `AGENTS.md` that states the same rule in
+different words further down.
+
+Side effects of moving to `--role`:
+
+- The role's YAML frontmatter is no longer pasted into the prompt as text.
+  `--append-system-prompt` reads the file verbatim; `coms.ts` strips it.
+- Identity and shared rules are one block with one heading tree, not two
+  disconnected appends.
+- Style is stated once, at the tail, with an explicit note that it overrides the
+  tool guidelines above it.
+
+`--system-prompt` and `--append-system-prompt` still work for older launchers:
+`coms.ts` reads identity frontmatter from them as before and appends only the
+hygiene block, so the role body is never injected twice.
 `just backoffice` is different — it **always** lands in the backoffice dir
 (`PI_BACKOFFICE_DIR`, default `~/repos/backoffice`) no matter where you invoke it,
 so it picks up that dir's local RAG extension and `AGENTS.md`. It takes `--team`

@@ -325,8 +325,8 @@ model: litellm/claude-opus-5
   `pi -e extensions/coms-net.ts` takes no role file, so hub peers stay
   explicit-model - note that `coms-net.ts` *does*
   parse frontmatter for name/description/color (its own copy of
-  `readFrontmatterFromArgv`), so a role file handed to a hub peer via
-  `--append-system-prompt` gives identity but not model. Deliberate, not an oversight.
+  `readFrontmatterFromArgv`), so a role file handed to a hub peer via `--role`
+  gives identity but not model. Deliberate, not an oversight.
 - `enabledModels` in settings does **not** constrain this: it only scopes Ctrl+P
   cycling. `--model` accepts anything in `pi --list-models`, verified by launching
   a model absent from that list.

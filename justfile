@@ -73,6 +73,29 @@ typecheck:
     cd "{{repo}}" && node "$tsc" -p tsconfig.typecheck.json
     echo "→ typecheck clean"
 
+# Run the tracked check harnesses in tests/. Plain node; every run is sandboxed
+# (scratch XDG_CONFIG_HOME / PI_CODING_AGENT_DIR / PI_COMS_DIR), so nothing on
+# the real machine is touched. `check` needs a global `pi` for the two RPC
+# checks. `check-install` additionally needs network and a pushed main: it
+# clones the git install and asserts the clone matches origin/main, so it only
+# makes sense once the current commit is what origin/main carries.
+[doc("Run the tracked check harnesses (tests/)")]
+check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{repo}}"
+    node tests/coms-setup.mjs
+    node tests/coms-setup-realpi.mjs
+    node tests/coms-settings.mjs
+    echo "→ check clean"
+
+[doc("Run the git-install harness (network; compares against origin/main)")]
+check-install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{repo}}"
+    node tests/git-install.mjs
+
 # ---------------------- coms (local P2P, unix sockets) ----------------------
 # These assume coms is installed globally (run `/coms-setup`). If it is not,
 # add `-e {{repo}}/extensions/coms.ts` to the pi invocation.

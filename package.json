@@ -2,7 +2,7 @@
   "name": "pi-ext-agent-comms",
   "private": true,
   "type": "module",
-  "description": "Peer-to-peer agent communication extensions for pi: coms (local unix sockets) + coms-net (HTTP/SSE hub)",
+  "description": "Peer-to-peer agent communication for pi: local coms over unix sockets",
   "keywords": ["pi-package", "pi-extension"],
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
@@ -19,7 +19,6 @@
     "typescript": "5.9.3"
   },
   "pi": {
-    "extensions": ["./extensions/coms.ts", "./extensions/coms-net.ts"],
-    "themes": ["./.pi/themes"]
+    "extensions": ["./extensions/coms.ts", "./extensions/editor-host.ts"]
   }
 }

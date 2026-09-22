@@ -3207,9 +3207,10 @@ export default function (pi: ExtensionAPI) {
       "Respawn your own agent session: shed stale context by starting a fresh session in-process. " +
       "Your identity (role file) carries over via pi's system-prompt regeneration. " +
       "Queues the /coms-respawn command as a follow-up; takes effect once the current turn settles. " +
-      "Set cold:true when you have no work in flight: the fresh session is seeded with your note as " +
-      "stored context and fires NO turn, so it idles at zero cost until real work arrives. Leave it " +
-      "unset to continue working immediately in the fresh session.",
+      "Warm by default: the fresh session acts on your note immediately, which is what you " +
+      "want when handing work back to the human or continuing a task. Set cold:true only to " +
+      "park silently until another agent wakes you: the note is seeded as context (rendered " +
+      "as a note, not a prompt) and fires NO turn.",
     parameters: Type.Object({
       note: Type.Optional(
         Type.String({
@@ -3220,7 +3221,7 @@ export default function (pi: ExtensionAPI) {
       cold: Type.Optional(
         Type.Boolean({
           description:
-            "Respawn without firing a turn: seed the note as stored context and idle. Use between tasks; do not use when work is in flight.",
+            "Respawn without firing a turn: seed the note as context and idle. Use only to park until another agent wakes you, not when work should continue.",
         }),
       ),
     }),
@@ -3593,7 +3594,7 @@ export default function (pi: ExtensionAPI) {
     } else {
       lines.push(
         "- Finish or hand off in-flight work before respawning. Never respawn mid-edit or while holding uncommitted work nobody has reported.",
-        "- Use coms_respawn with cold:true between tasks: it seeds your note and idles at zero cost.",
+        "- Respawn warm (leave cold unset) when you hand work back to the human or continue a task: the fresh session acts on your note immediately. Use coms_respawn with cold:true only to park for another agent to wake you.",
       );
     }
     return lines.join("\n");
@@ -3899,11 +3900,10 @@ export default function (pi: ExtensionAPI) {
             // session's history without dispatching a request. Used for cold
             // only; the warm path delivers the same text as a real prompt.
             if (cold) {
-              sm.appendMessage({
-                role: "user",
-                content: [{ type: "text", text: kickoff }],
-                timestamp: Date.now(),
-              });
+              // Displayed custom message, not role:"user": the note must be in
+              // LLM context, but a user message renders as a sent prompt that
+              // never gets an answer, which made parking look like a stall.
+              sm.appendCustomMessageEntry("coms-respawn-note", kickoff, true);
             }
           },
           // Omitted entirely when cold: any withSession callback that sends a

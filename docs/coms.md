@@ -93,8 +93,8 @@ only in who decides and whether the peer pays for a turn:
 `coms_cold_respawn` exists because asking is not free. A respawn request is a
 message, a message is a turn, and that turn re-sends the entire stale context at
 uncached price purely to throw it away. So the cold path delivers no message and
-triggers no LLM call: the fresh session is seeded with your note as stored
-context and idles at zero API cost until real work arrives. Verified against a
+triggers no LLM call: the fresh session is seeded with your note as context and
+idles at zero API cost until real work arrives. Verified against a
 provider-request probe: boot 0 requests, one real turn 1 request, cold respawn
 still 1, and only prompting the fresh session made it 2.
 
@@ -107,6 +107,12 @@ which:
 coms_cold_respawn -> builder: skipped (running), session left intact
 coms_cold_respawn -> builder: queued, no turn fired
 ```
+
+A warm respawn (no `cold`) is the default when you hand work back to the human
+or continue a task: the kickoff turn runs while the fresh context is still
+short, so it is cheap. Cold is for parking a peer nobody is waiting on. The cold
+note is stored as a displayed custom message (`coms-respawn-note`), so the
+transcript reads it as a note rather than an unanswered prompt.
 
 Always check the result rather than assuming it took effect.
 

@@ -3,11 +3,12 @@ set dotenv-load := true
 set positional-arguments
 
 # Repo root (where roles/ and scripts/ live). Resolved dynamically, no username
-# baked in: justfile_directory() is correct when you run in/under the repo, but
-# resolves to ~/.config/just via the global symlink (`just -g`) — so that case
-# falls back to a $HOME-relative path. Override with PI_COMS_REPO for any other
-# clone location.
-repo := env_var_or_default("PI_COMS_REPO", if path_exists(justfile_directory() / "roles") == "true" { justfile_directory() } else { home_directory() / "repos/local/pi-ext-agent-comms" })
+# baked in: source_directory() is the directory of the file the call appears in,
+# so it resolves to this package both when you run just in the checkout and when
+# `/coms-setup` imports this justfile through the global shim (`just -g`). The
+# $HOME fallback only covers an incomplete package (no roles/ next to the
+# justfile). Override with PI_COMS_REPO for any other clone location.
+repo := env_var_or_default("PI_COMS_REPO", if path_exists(source_directory() / "roles") == "true" { source_directory() } else { home_directory() / "repos/local/pi-ext-agent-comms" })
 # The directory you actually ran `just` in — peers launch here so they inherit
 # that project's .pi/ extensions, AGENTS.md, RAG index, etc.
 here := invocation_directory()

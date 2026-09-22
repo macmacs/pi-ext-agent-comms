@@ -43,18 +43,10 @@ default:
 
 # ---------------------- setup ------------------------------------------------
 
-# Install coms globally (auto-loads in every session) + wire `just -g` from anywhere.
-#   just install-global
-[doc("Install coms globally + symlink the justfile for `just -g` from anywhere")]
-install-global:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    pi install "{{repo}}"
-    echo "→ installed {{repo}} to ~/.pi/agent/settings.json"
-    mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/just"
-    ln -sf "{{repo}}/justfile" "${XDG_CONFIG_HOME:-$HOME/.config}/just/justfile"
-    echo "→ symlinked justfile to global location; now 'just -g <recipe>' works from any dir"
-
+# Install is two manual steps, because the first one cannot be a recipe:
+#   1. pi install git:github.com/macmacs/pi-ext-agent-comms
+#   2. restart pi, then run /coms-setup to wire `just -g`
+# Old `just install-global` recipe deleted with the coms-net restructure.
 # Typecheck the extensions with the repo's own pinned tsc (5.9.3). Deliberately
 # does NOT run npm install for you: a recipe that mutates node_modules behind
 # your back is a surprise, and the install is a one-time step.
@@ -75,7 +67,7 @@ typecheck:
     echo "→ typecheck clean"
 
 # ---------------------- coms (local P2P, unix sockets) ----------------------
-# These assume coms is installed globally (see install-global). If it is not,
+# These assume coms is installed globally (run `/coms-setup`). If it is not,
 # add `-e {{repo}}/extensions/coms.ts` to the pi invocation.
 
 # Local peer in the CURRENT directory:

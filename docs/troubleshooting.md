@@ -95,15 +95,15 @@ force; move it aside.
 **Symptom.** Outside the repo, `just -g` prints:
 
 ```
-error: no justfile found
-error: recipe `default` failed on line 43 with exit code 1
+error: justfile contains no default recipe
 ```
 
-**Cause.** Bare `just -g` runs the imported `default` recipe, which is
-`just --list`. That nested `just` call does not carry `-g`, so it searches
-upward from your current directory, finds no justfile and fails. In a project
-that has its own justfile, the same command prints that project's recipes
-instead of the global ones.
+**Cause.** The global justfile is the shim, which holds only an import. A bare
+`just` runs the first recipe defined in that file, and the shim defines none, so
+it fails before anything runs. Naming the recipe gets further: `just -g default`
+does run the package `default`, but that is `just --list` without `-g`, so it
+fails too, with `error: no justfile found` when your directory has no justfile
+of its own (and prints your own project's recipes when it has one).
 
 **Fix.** Name what you want:
 

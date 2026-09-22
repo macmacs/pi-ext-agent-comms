@@ -307,7 +307,7 @@ export async function runComsSetup(
   }
   if (filterLine) lines.push(filterLine);
   lines.push(
-    "run: just -g --list   (bare `just -g` runs `default`, which lists the justfile of your own directory)",
+    "run: just -g --list   (bare `just -g` has no default recipe: the shim holds only the import)",
   );
   notify(lines.join("\n"), "info");
 }

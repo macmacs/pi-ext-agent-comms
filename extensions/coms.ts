@@ -81,7 +81,7 @@ const PEER_TOKEN = /(?:^|\s)%([^\s%]*)$/;
 // back-compat with older transcripts and habits.
 const PEER_SIGIL_PREFIX = /^[%@]/;
 
-const FALLBACK_PALETTE = [
+export const FALLBACK_PALETTE = [
   "#72F1B8",
   "#36F9F6",
   "#FF7EDB",
@@ -251,7 +251,7 @@ interface InboundContext {
 // when it was actually triggered by an inbound coms message — not merely because
 // an inbound happens to be sitting in the queue while some other turn (e.g. a
 // proactive self-investigation) completes.
-function findTurnInitiator(branch: any[]): any | null {
+export function findTurnInitiator(branch: any[]): any | null {
   for (let i = branch.length - 1; i >= 0; i--) {
     const e = branch[i];
     if (e.type === "custom_message") return e;
@@ -265,7 +265,7 @@ function findTurnInitiator(branch: any[]): any | null {
 
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-function ulid(): string {
+export function ulid(): string {
   const time = Date.now();
   const rand = crypto.randomBytes(10);
   let timeStr = "";
@@ -295,19 +295,19 @@ function hexFg(hex: string, s: string): string {
   return `\x1b[38;2;${r};${g};${b}m${s}\x1b[39m`;
 }
 
-function isValidHex(hex: string): boolean {
+export function isValidHex(hex: string): boolean {
   return /^#[0-9a-fA-F]{6}$/.test(hex);
 }
 
 /** 1234 -> "1.2k", 1_050_000 -> "1.0M". Used for the context token label. */
-function compactTokens(n: number): string {
+export function compactTokens(n: number): string {
   if (!Number.isFinite(n) || n < 0) return "?";
   if (n < 1000) return String(Math.round(n));
   if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-function fallbackColor(sessionId: string): string {
+export function fallbackColor(sessionId: string): string {
   const h = crypto
     .createHash("sha256")
     .update(sessionId)
@@ -316,7 +316,7 @@ function fallbackColor(sessionId: string): string {
   return FALLBACK_PALETTE[Number(BigInt("0x" + h)) % FALLBACK_PALETTE.length];
 }
 
-function parseFrontmatter(raw: string): {
+export function parseFrontmatter(raw: string): {
   name?: string;
   description?: string;
   color?: string;
@@ -364,7 +364,7 @@ function nowIso(): string {
 // meaningless (the agent is mid-turn, so it is not idle at all). Returning null
 // rather than 0 keeps "unknown" and "just finished" distinguishable, so a caller
 // never mistakes a silent older peer for a fresh one.
-function idleMsSince(
+export function idleMsSince(
   lastTurnEndAt: string | null | undefined,
   running: boolean,
 ): number | null {
@@ -377,14 +377,14 @@ function idleMsSince(
 
 // Compact idle rendering for LLM consumption: this is re-read on every poll, so
 // it stays short and unit-suffixed rather than spelling out durations.
-function formatIdle(ms: number | null): string {
+export function formatIdle(ms: number | null): string {
   if (ms == null) return "?";
   if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
   if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
   return `${(ms / 3_600_000).toFixed(1)}h`;
 }
 
-function abbreviateModel(model: string, maxLen = 20): string {
+export function abbreviateModel(model: string, maxLen = 20): string {
   let m = model || "";
   // Strip vendor prefixes that add noise (us., eu., ap. routing prefixes + anthropic/openai/meta etc.)
   m = m.replace(/^(us|eu|ap)\./, "");
@@ -436,7 +436,7 @@ function registryFilePath(project: string, name: string): string {
   return path.join(projectAgentsDir(project), `${name}.json`);
 }
 
-function writeRegistryAtomic(entry: RegistryEntry, project: string): string {
+export function writeRegistryAtomic(entry: RegistryEntry, project: string): string {
   const dir = projectAgentsDir(project);
   fs.mkdirSync(dir, { recursive: true });
   const final = registryFilePath(project, entry.name);
@@ -446,7 +446,7 @@ function writeRegistryAtomic(entry: RegistryEntry, project: string): string {
   return final;
 }
 
-function readAllRegistryEntries(project: string): RegistryEntry[] {
+export function readAllRegistryEntries(project: string): RegistryEntry[] {
   const dir = projectAgentsDir(project);
   if (!fs.existsSync(dir)) return [];
   const out: RegistryEntry[] = [];
@@ -471,7 +471,7 @@ function readAllRegistryEntries(project: string): RegistryEntry[] {
   return out;
 }
 
-function readAllRegistryEntriesAcrossProjects(): RegistryEntry[] {
+export function readAllRegistryEntriesAcrossProjects(): RegistryEntry[] {
   const root = path.join(COMS_DIR, "projects");
   let projects: string[];
   try {
@@ -491,7 +491,7 @@ function readAllRegistryEntriesAcrossProjects(): RegistryEntry[] {
   return out;
 }
 
-function removeRegistryEntry(project: string, name: string): void {
+export function removeRegistryEntry(project: string, name: string): void {
   try {
     fs.unlinkSync(registryFilePath(project, name));
   } catch {
@@ -499,7 +499,7 @@ function removeRegistryEntry(project: string, name: string): void {
   }
 }
 
-function pruneDeadEntries(project: string): RegistryEntry[] {
+export function pruneDeadEntries(project: string): RegistryEntry[] {
   const entries = readAllRegistryEntries(project);
   const live: RegistryEntry[] = [];
   for (const entry of entries) {
@@ -518,7 +518,7 @@ function pruneDeadEntries(project: string): RegistryEntry[] {
   return live;
 }
 
-function resolveUniqueName(project: string, desiredName: string): string {
+export function resolveUniqueName(project: string, desiredName: string): string {
   // Returns a name that doesn't collide with any LIVE registered agent.
   // pruneDeadEntries auto-removes ESRCH entries; we only care about live ones.
   const liveEntries = pruneDeadEntries(project);
@@ -529,7 +529,7 @@ function resolveUniqueName(project: string, desiredName: string): string {
   return `${desiredName}${n}`;
 }
 
-function pruneDeadEntriesAllProjects(): RegistryEntry[] {
+export function pruneDeadEntriesAllProjects(): RegistryEntry[] {
   const root = path.join(COMS_DIR, "projects");
   let projects: string[];
   try {
@@ -554,7 +554,7 @@ function pruneDeadEntriesAllProjects(): RegistryEntry[] {
 // disk and shares our pid. Prune pid-owned entries before name resolution or we
 // collide with our own past self. Safe because a pid identifies exactly one
 // process: entries matching ours are stale copies of us, never live peers.
-function pruneEntriesOwnedByPid(pid: number): void {
+export function pruneEntriesOwnedByPid(pid: number): void {
   const root = path.join(COMS_DIR, "projects");
   let projects: string[];
   try {
@@ -727,7 +727,7 @@ function sendEnvelope(
 
 // ━━ Role file discovery ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-function findRoleFilePath(argv: string[]): string | null {
+export function findRoleFilePath(argv: string[]): string | null {
   // --role is the supported way in: coms owns the file end to end, reads the
   // frontmatter for identity, and injects the body itself at the TAIL of the
   // system prompt (see buildComsPrompt). --system-prompt and
@@ -758,11 +758,11 @@ function findRoleFilePath(argv: string[]): string | null {
 }
 
 /** True when the role file arrived via --role, so coms owns injecting its body. */
-function roleFileIsComsOwned(argv: string[]): boolean {
+export function roleFileIsComsOwned(argv: string[]): boolean {
   return argv.some((a) => a === "--role" || a.startsWith("--role="));
 }
 
-function readFrontmatterFromArgv(argv: string[]): {
+export function readFrontmatterFromArgv(argv: string[]): {
   name?: string;
   description?: string;
   color?: string;
@@ -786,7 +786,7 @@ function readFrontmatterFromArgv(argv: string[]): {
  * and split it across two blocks, and pi joins them ahead of the AGENTS.md
  * context files that repeat the same rule in different words.
  */
-function readRoleParts(argv: string[]): { body: string; common: string } {
+export function readRoleParts(argv: string[]): { body: string; common: string } {
   const p = findRoleFilePath(argv);
   if (!p || !roleFileIsComsOwned(argv)) return { body: "", common: "" };
   let body = "";

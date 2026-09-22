@@ -84,6 +84,7 @@ check:
     #!/usr/bin/env bash
     set -euo pipefail
     cd "{{repo}}"
+    node tests/coms-core.mjs
     node tests/coms-setup.mjs
     node tests/coms-setup-realpi.mjs
     node tests/coms-settings.mjs

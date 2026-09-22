@@ -87,6 +87,7 @@ check:
     node tests/coms-core.mjs
     node tests/coms-setup.mjs
     node tests/coms-setup-realpi.mjs
+    node tests/coms-roundtrip.mjs
     node tests/coms-settings.mjs
     echo "→ check clean"
 

@@ -667,7 +667,7 @@ function readOneLine(socket: net.Socket): Promise<string> {
   });
 }
 
-function sendEnvelope(
+export function sendEnvelope(
   endpoint: string,
   envelope:
     | Envelope

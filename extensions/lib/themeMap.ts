@@ -20,7 +20,6 @@ import { fileURLToPath } from "url";
 //
 export const THEME_MAP: Record<string, string> = {
 	"coms":               "ocean-breeze",     // peer-to-peer messaging, cross-boundary
-	"coms-net":           "ocean-breeze",     // peer-to-peer messaging, cross-boundary
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────

@@ -44,8 +44,6 @@ default:
 # ---------------------- setup ------------------------------------------------
 
 # Install coms globally (auto-loads in every session) + wire `just -g` from anywhere.
-# Filters the package to coms.ts only: coms-net.ts errors on boot without a hub,
-# so it stays opt-in via an explicit `pi -e {{repo}}/extensions/coms-net.ts`.
 #   just install-global
 [doc("Install coms globally + symlink the justfile for `just -g` from anywhere")]
 install-global:
@@ -53,9 +51,6 @@ install-global:
     set -euo pipefail
     pi install "{{repo}}"
     echo "→ installed {{repo}} to ~/.pi/agent/settings.json"
-    echo "  If every session shows a coms-net 'no server URL' error, filter the"
-    echo "  package to coms.ts only in ~/.pi/agent/settings.json:"
-    echo '    { "source": "'"{{repo}}"'", "extensions": ["extensions/coms.ts"] }'
     mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/just"
     ln -sf "{{repo}}/justfile" "${XDG_CONFIG_HOME:-$HOME/.config}/just/justfile"
     echo "→ symlinked justfile to global location; now 'just -g <recipe>' works from any dir"
@@ -63,8 +58,7 @@ install-global:
 # Typecheck the extensions with the repo's own pinned tsc (5.9.3). Deliberately
 # does NOT run npm install for you: a recipe that mutates node_modules behind
 # your back is a surprise, and the install is a one-time step.
-# Covers coms.ts, editor-host.ts and naming.ts; coms-net.ts is excluded, see
-# tsconfig.typecheck.json and the README.
+# Covers coms.ts, editor-host.ts and naming.ts; see tsconfig.typecheck.json.
 #   npm install     # once
 #   just typecheck
 [doc("Typecheck the extensions with the repo's pinned tsc")]

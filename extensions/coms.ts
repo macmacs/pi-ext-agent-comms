@@ -1919,7 +1919,7 @@ export default function (pi: ExtensionAPI) {
       ]);
 
       // Bottom-left: working spinner.
-      // Bottom-right: @name ─ model ─ thinking ─ used/window tokens.
+      // Bottom-right: @name ─ model (provider) ─ thinking ─ used/window tokens.
       host.registerSegment({
         owner: "coms",
         zone: "bottom_left",
@@ -1941,7 +1941,12 @@ export default function (pi: ExtensionAPI) {
         owner: "coms",
         zone: "bottom_right",
         order: 1,
-        get: () => ctx.model?.name ?? null,
+        get: () => {
+          const name = ctx.model?.name;
+          if (!name) return null;
+          const provider = ctx.model?.provider;
+          return provider ? `${name} (${provider})` : name;
+        },
       });
       host.registerSegment({
         owner: "coms",

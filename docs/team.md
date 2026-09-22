@@ -69,6 +69,14 @@ just role builder --team frontend --model openrouter/x-ai/grok-5
 
 Override `repo` with `PI_COMS_REPO` if you have another clone.
 
+Recipe settings can also live in a file next to the global shim,
+`${XDG_CONFIG_HOME:-$HOME/.config}/just/coms.env`. `/coms-setup` seeds it with
+commented examples. See what a recipe will use:
+
+```bash
+"$(just -g --evaluate repo)"/scripts/coms-setting PI_COMS_TEAM
+```
+
 ## Teams (multiple independent pools)
 
 A "team" is a coms **pool**: a shared discovery namespace at
@@ -83,7 +91,8 @@ just role builder --team=frontend       # same, equals form
 PI_COMS_TEAM=frontend just role builder # default for this shell
 ```
 
-Precedence: `--team` > `PI_COMS_TEAM` > `team`.
+Precedence: `--team` > environment (`PI_COMS_TEAM`, or a project `.env` just
+loaded) > the `coms.env` settings file > `team`.
 
 The same role name can run in two teams simultaneously (`builder` in `frontend`
 and `builder` in `backend`); pools are isolated. Within *one* pool a duplicate

@@ -31,7 +31,8 @@ Restart pi, then run the setup command once:
 ```
 
 That writes the global justfile shim so the recipes run from any directory, and
-proves the shim resolves back to the installed package. Check it:
+proves the shim resolves back to the installed package. It also drops a
+commented settings file next to the shim. Check it:
 
 ```bash
 just -g --list
@@ -103,6 +104,14 @@ Roles, pools, per-role models and tool budgets live in
 carry the identity for co-loaded extensions, and give `/reload` a stable name).
 `PI_PARENT_SESSION` is read-only; nothing in this repo or in pi sets it today, so
 every coms agent counts as root.
+
+`PI_COMS_TEAM`, `PI_BACKOFFICE_DIR` and `PI_LEAN_EXCLUDE` (the `just lean`
+denylist) can also live in a settings file next to the shim,
+`${XDG_CONFIG_HOME:-$HOME/.config}/just/coms.env`; `/coms-setup` writes it once
+as a commented template and never overwrites it. Plain `KEY=value` lines. An
+environment variable always wins, and a project `.env` wins in between when
+just loads it for a recipe. The other variables above are read by the
+extension at runtime, not by the recipes, and stay environment-only.
 
 Pointing `PI_COMS_DIR` somewhere else gives you a completely separate registry,
 which is the clean way to try things out without touching a live pool. Export it

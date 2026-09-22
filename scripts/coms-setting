@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Print one coms setting for the just recipes.
+#
+#   scripts/coms-setting PI_COMS_TEAM team
+#
+# Precedence, highest first:
+#   1. the environment variable (a real export, or a project .env that just
+#      already loaded for this recipe)
+#   2. the settings file, ${XDG_CONFIG_HOME:-$HOME/.config}/just/coms.env
+#   3. the default given on the command line
+#
+# The settings file holds plain KEY=value lines; blank lines and `#` comments
+# are ignored, the last line for a key wins, and values are used as-is (no ~ or
+# $HOME expansion, so paths must be absolute). /coms-setup writes it once as a
+# commented template.
+#
+# Always exits 0 and prints exactly the value (no trailing newline), so a
+# missing key or file can never break `just --list`. A malformed key is the one
+# loud error.
+set -euo pipefail
+
+key="${1-}"
+default="${2-}"
+case "$key" in
+  "" | *[!A-Za-z0-9_]*)
+    echo "coms-setting: bad key '${key:-<empty>}'" >&2
+    exit 2
+    ;;
+esac
+
+# Indirect expansion (bash): the environment wins over the file.
+value="${!key-}"
+if [ -z "$value" ]; then
+  xdg="${XDG_CONFIG_HOME:-}"
+  case "$xdg" in
+    /*) config_home="$xdg" ;;                          # absolute: just honours it
+    *)  config_home="${HOME:-/nonexistent}/.config" ;; # empty or relative: just ignores it
+  esac
+  file="$config_home/just/coms.env"
+  if [ -f "$file" ]; then
+    raw="$(sed -n "s/^[[:space:]]*$key[[:space:]]*=[[:space:]]*//p" "$file" | tr -d '\r' | tail -n 1)" || raw=""
+    case "$raw" in
+      \"*\") value="${raw#\"}"; value="${value%\"}" ;;
+      \'*\') value="${raw#\'}"; value="${value%\'}" ;;
+      *)    value="$raw" ;;
+    esac
+  fi
+fi
+
+[ -n "$value" ] || value="$default"
+printf '%s' "$value"

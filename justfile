@@ -12,13 +12,20 @@ repo := env_var_or_default("PI_COMS_REPO", if path_exists(source_directory() / "
 # The directory you actually ran `just` in — peers launch here so they inherit
 # that project's .pi/ extensions, AGENTS.md, RAG index, etc.
 here := invocation_directory()
-# Where the backoffice knowledge base lives (its own .pi/ RAG extension +
-# AGENTS.md). $HOME-relative; override with PI_BACKOFFICE_DIR if you move it.
-backoffice_dir := env_var_or_default("PI_BACKOFFICE_DIR", home_directory() / "repos/backoffice")
+# ── settings ───────────────────────────────────────────────────────────────
+# Fallbacks for scripts/coms-setting, which resolves a setting at recipe
+# runtime. Precedence, highest first: an environment variable, the caller's
+# project .env (just loads it for recipes), the settings file at
+# ${XDG_CONFIG_HOME:-$HOME/.config}/just/coms.env, then these fallbacks.
+# /coms-setup writes that file as a commented template; keep durable values
+# there, because this justfile is reset by `pi update --extensions`.
+#
 # Default coms pool every peer joins. This is the shared discovery pool: agents
-# only see each other if they share it. Override per-run with `--team <name>` or
-# globally with PI_COMS_TEAM to run several independent teams side by side.
-team_default := env_var_or_default("PI_COMS_TEAM", "team")
+# only see each other if they share it. Override per-run with `--team <name>`.
+team_fallback := "team"
+# Where the backoffice knowledge base lives (its own .pi/ RAG extension +
+# AGENTS.md). $HOME-relative default.
+backoffice_fallback := home_directory() / "repos/backoffice"
 
 # Tools every role gets, no matter what. Everything else is opt-in per role via
 # a `tools:` key in the role frontmatter (see the `role` recipe).
@@ -34,10 +41,9 @@ team_default := env_var_or_default("PI_COMS_TEAM", "team")
 # talking to peers. A role that needs web, tickets or a sandbox says so itself.
 tools_core := "read,bash,edit,write,todo,ask_user_question,coms_send,coms_list,coms_respawn,coms_cold_respawn,coms_request_respawn,ctx_search"
 
-# Denylist for `just lean` (your own session, not a role peer). Override with
-# PI_LEAN_EXCLUDE to tune it without editing this file. See the `lean` recipe for
-# what is deliberately KEPT.
-lean_exclude := env_var_or_default("PI_LEAN_EXCLUDE", "ctx_purge,ctx_doctor,ctx_stats,ctx_upgrade,ctx_insight,aio-webpull,aio-webquery,aio-webmap,aio-webresearch,aio-webresult,aio-webcontent,mcp,mcpScript")
+# Denylist fallback for `just lean` (your own session, not a role peer). See
+# the `lean` recipe for what is deliberately KEPT.
+lean_fallback := "ctx_purge,ctx_doctor,ctx_stats,ctx_upgrade,ctx_insight,aio-webpull,aio-webquery,aio-webmap,aio-webresearch,aio-webresult,aio-webcontent,mcp,mcpScript"
 
 default:
     @just --list
@@ -99,7 +105,7 @@ local-coms *args:
 #   PI_LEAN_EXCLUDE="mcp,mcpScript" just lean      # tune it without editing here
 [doc("pi in the current dir with the rarely-used tools excluded")]
 lean *args:
-    @cd "{{here}}" && exec pi --exclude-tools "{{lean_exclude}}" {{args}}
+    @cd "{{here}}" && exec pi --exclude-tools "$("{{repo}}/scripts/coms-setting" PI_LEAN_EXCLUDE "{{lean_fallback}}")" {{args}}
 
 # Role-file peer (identity from roles/<name>.md; replays across respawn).
 # Launches in the CURRENT directory, so it inherits that project's .pi/ setup.
@@ -137,7 +143,7 @@ role name *args:
     # $common_file is not passed on the command line: coms finds it as a sibling
     # of $role_file. It is checked here so a missing shared file fails loudly at
     # launch instead of silently dropping the team rules from the prompt.
-    team="{{team_default}}"
+    team="$("{{repo}}/scripts/coms-setting" PI_COMS_TEAM "{{team_fallback}}")"
     rest=()
     has_model=0
     has_tools=0
@@ -189,8 +195,9 @@ backoffice *args:
     common_file="{{repo}}/roles/_common.md"
     test -f "$role_file" || { echo "role file $role_file not found" >&2; exit 1; }
     test -f "$common_file" || { echo "shared role file $common_file not found" >&2; exit 1; }
-    test -d "{{backoffice_dir}}" || { echo "backoffice dir {{backoffice_dir}} not found (set PI_BACKOFFICE_DIR)" >&2; exit 1; }
-    team="{{team_default}}"
+    bo="$("{{repo}}/scripts/coms-setting" PI_BACKOFFICE_DIR "{{backoffice_fallback}}")"
+    test -d "$bo" || { echo "backoffice dir $bo not found (set PI_BACKOFFICE_DIR, or PI_BACKOFFICE_DIR in the coms.env settings file)" >&2; exit 1; }
+    team="$("{{repo}}/scripts/coms-setting" PI_COMS_TEAM "{{team_fallback}}")"
     rest=()
     has_model=0
     has_tools=0
@@ -223,7 +230,7 @@ backoffice *args:
         tools=(--tools "{{tools_core}},$allow")
       fi
     fi
-    cd "{{backoffice_dir}}"
+    cd "$bo"
     exec pi --cname backoffice --role "$role_file" \
             --project "$team" ${model:+--model "$model"} \
             ${tools[@]+"${tools[@]}"} ${rest[@]+"${rest[@]}"}
@@ -270,15 +277,15 @@ respawn-demo *args="":
 # so `here` is passed explicitly (shebang/script pwd is the justfile dir, not
 # yours).
 
-# Whole team tiled in one tmux window on the DEFAULT pool ({{team_default}}).
-# Session coms-{{team_default}}, one pane per role, per-role models from
+# Whole team tiled in one tmux window on the default pool.
+# Session coms-<pool>, one pane per role, per-role models from
 # roles/<name>.md frontmatter. Pane borders carry the role names; prefix-z
 # zooms one agent to fullscreen.
 #   just team orchestrator builder scribe researcher
 #   just team --windows orchestrator builder
 [doc("Tile roles in one tmux window on the default pool (--windows for one window each)")]
 team +roles:
-    @"{{repo}}/scripts/coms-team" --repo "{{repo}}" --pool "{{team_default}}" --dir "{{here}}" {{roles}}
+    @"{{repo}}/scripts/coms-team" --repo "{{repo}}" --pool "$("{{repo}}/scripts/coms-setting" PI_COMS_TEAM "{{team_fallback}}")" --dir "{{here}}" {{roles}}
 
 # Same, on an explicitly named pool - run several teams side by side.
 # Session coms-<team_name>.

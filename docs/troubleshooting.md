@@ -113,6 +113,25 @@ just -g teams
 just -g role builder
 ```
 
+## A setting in `coms.env` has no effect
+
+**Symptom.** You edited `${XDG_CONFIG_HOME:-$HOME/.config}/just/coms.env`, but
+`just -g role` still joins the old pool (or the default).
+
+**Cause.** Something with higher precedence wins: a `--team` flag, a real
+environment variable, or a project `.env` that just loaded for the recipe.
+Values in the file only apply when nothing above them is set.
+
+**Fix.** Ask the helper what the recipe sees:
+
+```bash
+"$(just -g --evaluate repo)"/scripts/coms-setting PI_COMS_TEAM
+```
+
+It prints the environment value, else the file value, else nothing. Check the
+path too: with `XDG_CONFIG_HOME` set, just reads the shim, and `/coms-setup`
+wrote `coms.env`, under that directory.
+
 ## `just typecheck: no local typescript found`
 
 **Symptom.**

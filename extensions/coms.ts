@@ -43,6 +43,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
 import { pickLevelOneName } from "./naming.ts";
+import { registerComsSetup } from "./coms-setup.ts";
 import { complete } from "@earendil-works/pi-ai/compat";
 
 // ━━ Constants ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3866,6 +3867,11 @@ export default function (pi: ExtensionAPI) {
       }
     },
   });
+
+  // ━━ /coms-setup slash command ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Wires the global justfile shim (see extensions/coms-setup.ts). Pass this
+  // file's own URL: provenance matches the command entry that loaded it.
+  registerComsSetup(pi, import.meta.url);
 
   // ━━ Clean shutdown ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   let shuttingDown = false;

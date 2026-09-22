@@ -79,8 +79,20 @@ typecheck:
 # checks. `check-install` additionally needs network and a pushed main: it
 # clones the git install and asserts the clone matches origin/main, so it only
 # makes sense once the current commit is what origin/main carries.
+# Shared precondition: the harnesses import the pi packages, so an installed
+# clone (no node_modules; all deps are devDependencies) gets a clear error
+# instead of a resolver stack.
+_node-modules:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -d "{{repo}}/node_modules" ]; then
+      echo "no node_modules in {{repo}}" >&2
+      echo "  run 'npm install' there first (the harnesses import the pi packages)" >&2
+      exit 1
+    fi
+
 [doc("Run the tracked check harnesses (tests/)")]
-check:
+check: _node-modules
     #!/usr/bin/env bash
     set -euo pipefail
     cd "{{repo}}"
@@ -92,7 +104,7 @@ check:
     echo "→ check clean"
 
 [doc("Run the git-install harness (network; compares against origin/main)")]
-check-install:
+check-install: _node-modules
     #!/usr/bin/env bash
     set -euo pipefail
     cd "{{repo}}"

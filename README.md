@@ -135,6 +135,11 @@ just -g role builder    # registers in the scratch registry, invisible to the re
   deps are the pinned tsc 5.9.3 plus the pi packages for their `.d.ts` only,
   nothing at runtime. CI runs the same check (`npm ci`, `just typecheck`) on
   pushes to `main` and on pull requests.
+- Checks: `just check` runs the tracked harnesses in `tests/` against scratch
+  dirs (the two RPC ones spawn `pi`); 212 cases across transport, setup,
+  install and settings. `just check-install` additionally needs network: it
+  clones the git install and compares it to `origin/main`. CI runs `just check`
+  on push and PR, and `just check-install` on push to `main` only.
 - `coms.ts` loads its helpers (`editor-host.ts`, `naming.ts`) as plain modules.
   The manifest lists only `coms.ts` and `editor-host.ts` as extensions, so
   helpers are never boot surfaces.

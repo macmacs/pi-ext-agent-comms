@@ -54,6 +54,9 @@ TUI:
 - `/coms` opens the pool view with live status
 - `%agent` talks to one peer directly
 - Ctrl+O expands message details
+- C-x n / C-x p selects a peer in the pool (C-n/C-p move once selected, Enter
+  jumps to it, Esc cancels). Ctrl+N and Ctrl+P stay pi's: Ctrl+P is the global
+  next-model binding, Ctrl+N toggles the named filter in selectors.
 
 ## Why `%` and not `@`
 

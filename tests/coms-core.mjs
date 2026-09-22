@@ -283,6 +283,49 @@ check(
   coms.findTurnInitiator([{ type: "assistant" }, { type: "toolResult", message: { role: "user" } }]) === null,
 );
 
+// ━━ peer selector keys ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+const KEY = { ctrlN: "\x0e", ctrlP: "\x10", ctrlX: "\x18", esc: "\x1b", enter: "\r" };
+const keyState = (o = {}) => ({ leader: false, autocomplete: false, selected: -1, rows: 3, ...o });
+
+check("poolKeyAction: ctrl+p passes through with no selection", coms.poolKeyAction(KEY.ctrlP, keyState()) === null);
+check("poolKeyAction: ctrl+n passes through with no selection", coms.poolKeyAction(KEY.ctrlN, keyState()) === null);
+check(
+  "poolKeyAction: autocomplete owns the keys",
+  coms.poolKeyAction(KEY.ctrlP, keyState({ selected: 1, autocomplete: true })) === null,
+);
+check("poolKeyAction: ctrl+p moves up while selected", coms.poolKeyAction(KEY.ctrlP, keyState({ selected: 2 }))?.index === 1);
+check("poolKeyAction: ctrl+p at the first row clears", coms.poolKeyAction(KEY.ctrlP, keyState({ selected: 0 }))?.index === -1);
+check("poolKeyAction: ctrl+n wraps past the last row", coms.poolKeyAction(KEY.ctrlN, keyState({ selected: 2 }))?.index === -1);
+check(
+  "poolKeyAction: enter navigates only when selected",
+  coms.poolKeyAction(KEY.enter, keyState({ selected: 1 }))?.kind === "navigate" &&
+    coms.poolKeyAction(KEY.enter, keyState()) === null,
+);
+check(
+  "poolKeyAction: escape clears only when selected",
+  coms.poolKeyAction(KEY.esc, keyState({ selected: 1 }))?.kind === "clear" && coms.poolKeyAction(KEY.esc, keyState()) === null,
+);
+check(
+  "poolKeyAction: x closes only when selected",
+  coms.poolKeyAction("x", keyState({ selected: 0 }))?.kind === "close" && coms.poolKeyAction("x", keyState()) === null,
+);
+check("poolKeyAction: ctrl+x enters the leader", coms.poolKeyAction(KEY.ctrlX, keyState())?.kind === "leader_enter");
+check("poolKeyAction: leader consumes the next key", coms.poolKeyAction("n", keyState({ leader: true }))?.kind === "leader_key");
+check("poolKeyAction: leader escape is flagged", coms.poolKeyAction(KEY.esc, keyState({ leader: true }))?.escape === true);
+check(
+  "poolLeaderSelection: starts at the first or last row",
+  coms.poolLeaderSelection("n", -1, 3) === 0 && coms.poolLeaderSelection("p", -1, 3) === 2,
+);
+check(
+  "poolLeaderSelection: wraps to cleared",
+  coms.poolLeaderSelection("n", 2, 3) === -1 && coms.poolLeaderSelection("p", 0, 3) === -1,
+);
+check(
+  "poolLeaderSelection: empty pool or other key is a no-op",
+  coms.poolLeaderSelection("n", -1, 0) === null && coms.poolLeaderSelection("h", 0, 3) === null,
+);
+
 // ━━ summary ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 console.log(`\n${passed} checks passed, ${failures.length} failed`);

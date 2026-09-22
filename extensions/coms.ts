@@ -807,6 +807,72 @@ export function readRoleParts(argv: string[]): { body: string; common: string } 
   return { body, common };
 }
 
+// ━━ Peer selector keys ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// The pool widget is always visible, but its keys are only coms's while a row
+// is selected or the C-x leader is armed. Otherwise Ctrl+N / Ctrl+P must reach
+// pi: Ctrl+P is the global "next model" binding and Ctrl+N toggles the named
+// filter in selectors. Exported so the tests can drive the decision without a
+// TUI.
+
+export type PoolKeyAction =
+  | { kind: "leader_enter" }
+  | { kind: "leader_key"; data: string; escape: boolean }
+  | { kind: "select"; index: number }
+  | { kind: "navigate"; index: number }
+  | { kind: "clear" }
+  | { kind: "close"; index: number };
+
+/** Decide what one editor key does for the pool selector. null = pass through. */
+export function poolKeyAction(
+  data: string,
+  state: {
+    leader: boolean;
+    autocomplete: boolean;
+    selected: number;
+    rows: number;
+  },
+): PoolKeyAction | null {
+  if (state.leader) {
+    return { kind: "leader_key", data, escape: matchesKey(data, Key.escape) };
+  }
+  if (matchesKey(data, Key.ctrl("x"))) return { kind: "leader_enter" };
+  // Let the autocomplete dropdown own C-n/C-p/enter/esc while open.
+  if (state.autocomplete) return null;
+  const sel = state.selected;
+  // Ctrl+N / Ctrl+P stay pi's until a row is selected: Ctrl+P is the global
+  // "next model" binding and Ctrl+N toggles the named filter in selectors.
+  // The selection starts with the C-x leader (n/p).
+  if (matchesKey(data, Key.ctrl("n")) && sel >= 0) {
+    return { kind: "select", index: sel >= state.rows - 1 ? -1 : sel + 1 };
+  }
+  if (matchesKey(data, Key.ctrl("p")) && sel >= 0) {
+    return { kind: "select", index: sel - 1 };
+  }
+  if (matchesKey(data, Key.enter) && sel >= 0 && sel < state.rows) {
+    return { kind: "navigate", index: sel };
+  }
+  if (matchesKey(data, Key.escape) && sel >= 0) return { kind: "clear" };
+  if (data === "x" && sel >= 0) return { kind: "close", index: sel };
+  return null;
+}
+
+// Selection step for the C-x leader (n/p). Returns the new index, or null when
+// the key is not a selection step or the pool is empty. -1 clears the selection.
+export function poolLeaderSelection(
+  data: string,
+  selected: number,
+  rows: number,
+): number | null {
+  if (rows === 0) return null;
+  if (data === "n") {
+    return selected === -1 ? 0 : selected >= rows - 1 ? -1 : selected + 1;
+  }
+  if (data === "p") {
+    return selected === -1 ? rows - 1 : selected === 0 ? -1 : selected - 1;
+  }
+  return null;
+}
+
 // ━━ Default export ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 export default function (pi: ExtensionAPI) {
@@ -1840,7 +1906,17 @@ export default function (pi: ExtensionAPI) {
           /* ignore */
         }
       };
-      const leaderBindings = new Map<string, () => void>([["h", toggleWidget]]);
+      function stepPoolSelection(dir: "n" | "p"): void {
+        const next = poolLeaderSelection(dir, selectedIndex, buildPoolRows().length);
+        if (next === null) return;
+        selectedIndex = next;
+        host.requestRender();
+      }
+      const leaderBindings = new Map<string, () => void>([
+        ["h", toggleWidget],
+        ["n", () => stepPoolSelection("n")],
+        ["p", () => stepPoolSelection("p")],
+      ]);
 
       // Bottom-left: working spinner.
       // Bottom-right: @name ─ model ─ thinking ─ used/window tokens.
@@ -1903,57 +1979,50 @@ export default function (pi: ExtensionAPI) {
       host.registerKeyHandler({
         owner: "coms",
         handle: (data, api) => {
-          if (leaderActive) {
-            leaderActive = false;
-            setLeaderStatus(false);
-            if (!matchesKey(data, Key.escape)) leaderBindings.get(data)?.();
-            host.requestRender();
-            return true;
-          }
-          if (matchesKey(data, Key.ctrl("x"))) {
-            leaderActive = true;
-            setLeaderStatus(true);
-            host.requestRender();
-            return true;
-          }
-          // Let the autocomplete dropdown own C-n/C-p/enter/esc while open.
-          if (api.isShowingAutocomplete()) return false;
-          const rows = buildPoolRows().map((r) => r.name);
-          const sel = selectedIndex;
-          if (matchesKey(data, Key.ctrl("n"))) {
-            if (rows.length > 0) {
-              selectedIndex = sel >= rows.length - 1 ? -1 : sel + 1;
+          const rows = buildPoolRows();
+          const action = poolKeyAction(data, {
+            leader: leaderActive,
+            autocomplete: api.isShowingAutocomplete(),
+            selected: selectedIndex,
+            rows: rows.length,
+          });
+          if (!action) return false;
+          switch (action.kind) {
+            case "leader_enter":
+              leaderActive = true;
+              setLeaderStatus(true);
               host.requestRender();
-            }
-            return true;
-          }
-          if (matchesKey(data, Key.ctrl("p"))) {
-            if (rows.length > 0) {
-              selectedIndex = sel === -1 ? rows.length - 1 : sel - 1;
+              break;
+            case "leader_key":
+              leaderActive = false;
+              setLeaderStatus(false);
+              if (!action.escape) leaderBindings.get(action.data)?.();
               host.requestRender();
+              break;
+            case "select":
+              selectedIndex = action.index;
+              host.requestRender();
+              break;
+            case "navigate": {
+              const n = rows[action.index]?.name;
+              if (n) navigateToAgent(n);
+              selectedIndex = -1;
+              host.requestRender();
+              break;
             }
-            return true;
+            case "clear":
+              selectedIndex = -1;
+              host.requestRender();
+              break;
+            case "close": {
+              const n = rows[action.index]?.name;
+              if (n) closeAgent(n);
+              selectedIndex = -1;
+              host.requestRender();
+              break;
+            }
           }
-          if (matchesKey(data, Key.enter) && sel >= 0) {
-            const n = rows[sel];
-            if (n) navigateToAgent(n);
-            selectedIndex = -1;
-            host.requestRender();
-            return true;
-          }
-          if (matchesKey(data, Key.escape) && sel >= 0) {
-            selectedIndex = -1;
-            host.requestRender();
-            return true;
-          }
-          if (data === "x" && sel >= 0) {
-            const n = rows[sel];
-            if (n) closeAgent(n);
-            selectedIndex = -1;
-            host.requestRender();
-            return true;
-          }
-          return false;
+          return true;
         },
       });
 

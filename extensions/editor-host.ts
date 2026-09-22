@@ -151,13 +151,13 @@ const byOrder = <T extends { order?: number }>(a: T, b: T) =>
   (a.order ?? 0) - (b.order ?? 0);
 
 class HostEditor extends CustomEditor {
-  constructor(
-    private _tui: any,
-    theme: any,
-    keybindings: any,
-    private host: EditorHost,
-  ) {
+  private _tui: any;
+  private host: EditorHost;
+
+  constructor(_tui: any, theme: any, keybindings: any, host: EditorHost) {
     super(_tui, theme, keybindings);
+    this._tui = _tui;
+    this.host = host;
   }
 
   override handleInput(data: string): void {

@@ -264,9 +264,20 @@ const parts = coms.readRoleParts(["--role", rolePath]);
 check("readRoleParts: body and common trimmed", parts.body === "do the thing" && parts.common === "be kind", JSON.stringify(parts));
 const noOwn = coms.readRoleParts(["--append-system-prompt", otherPath]);
 check("readRoleParts: fallback leaves both empty", noOwn.body === "" && noOwn.common === "");
+const sharedDir = fs.mkdtempSync(path.join(ROOT, "shared-"));
+fs.writeFileSync(path.join(sharedDir, "_common.md"), "shipped rules\n");
+const siblingWins = coms.readRoleParts(["--role", rolePath], [sharedDir]);
+check("readRoleParts: sibling _common beats the shipped one", siblingWins.common === "be kind", JSON.stringify(siblingWins));
 fs.rmSync(commonPath);
-const solo = coms.readRoleParts(["--role", rolePath]);
-check("readRoleParts: no _common gives body only", solo.body === "do the thing" && solo.common === "");
+const shippedCommon = coms.readRoleParts(["--role", rolePath], [path.join(ROOT, "no-such-dir"), sharedDir]);
+check("readRoleParts: no sibling falls back to the shipped _common", shippedCommon.common === "shipped rules", JSON.stringify(shippedCommon));
+const solo = coms.readRoleParts(["--role", rolePath], []);
+check("readRoleParts: no _common anywhere gives body only", solo.body === "do the thing" && solo.common === "");
+check(
+  "sharedRoleDirs: includes the package roles/",
+  coms.sharedRoleDirs().includes(path.join(REPO, "roles")),
+  JSON.stringify(coms.sharedRoleDirs()),
+);
 
 // ━━ turn initiator ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

@@ -145,14 +145,18 @@ local-coms *args:
 lean *args:
     @cd "{{here}}" && exec pi --exclude-tools "$("{{repo}}/scripts/coms-setting" PI_LEAN_EXCLUDE "{{lean_fallback}}")" {{args}}
 
-# Role-file peer (identity from roles/<name>.md; replays across respawn).
+# Role-file peer (identity from <name>.md; replays across respawn).
 # Launches in the CURRENT directory, so it inherits that project's .pi/ setup.
 # Joins the default pool unless you pass --team; any other args go through to pi.
-# A `model:` key in the role file's frontmatter becomes the default --model
-# (pi's `<provider>/<id>[:<thinking>]` syntax); an explicit --model still wins.
+# The role file is looked up in ./.pi/coms/roles/, then the user roles dir
+# (PI_COMS_ROLES_DIR, default ~/.config/just/coms-roles/), then the shipped
+# roles/. First match wins (scripts/role-resolve).
+# Model, highest first: --model on the command line, PI_COMS_MODEL_<ROLE> in the
+# environment, the same key in coms.env, then `model:` in the frontmatter (pi's
+# `<provider>/<id>[:<thinking>]` syntax). <ROLE> is upper case, `-` as `_`.
 # The role file goes in via coms' own --role, NOT --append-system-prompt: coms
-# reads identity from the frontmatter and injects the body plus the sibling
-# roles/_common.md as ONE block at the very END of the system prompt, after
+# reads identity from the frontmatter and injects the body plus _common.md
+# (next to the role file, else the shipped one) as ONE block at the very END of the system prompt, after
 # pi's AGENTS.md context files and skill list, so the style rule wins on
 # recency instead of being buried mid-prompt.
 #
@@ -168,19 +172,18 @@ lean *args:
 #   just role orchestrator   # or: builder / researcher / secops-dev / scribe
 #   just role builder --team frontend
 #   just role builder --team frontend --model openrouter/x-ai/grok-5
-[doc("Role-file peer from roles/<name>.md in the current dir")]
+[doc("Role-file peer (project, user or shipped roles) in the current dir")]
 role name *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    case "{{name}}" in _*) echo "'{{name}}' is a shared fragment, not a role" >&2; exit 1 ;; esac
-    role_file="{{repo}}/roles/{{name}}.md"
-    common_file="{{repo}}/roles/_common.md"
-    test -f "$role_file" || { echo "role file $role_file not found" >&2; exit 1; }
-    test -f "$common_file" || { echo "shared role file $common_file not found" >&2; exit 1; }
+    # Project .pi/coms/roles/, then the user roles dir, then the shipped roles/.
+    role_file="$("{{repo}}/scripts/role-resolve" path "{{name}}" "{{here}}")"
     shift                      # drop the role name; leaves only pass-through args
-    # $common_file is not passed on the command line: coms finds it as a sibling
-    # of $role_file. It is checked here so a missing shared file fails loudly at
-    # launch instead of silently dropping the team rules from the prompt.
+    # _common.md is not passed on the command line: coms finds it next to
+    # $role_file, else in the shipped roles/. It is checked here so a missing
+    # shared file fails loudly at launch instead of silently dropping the team
+    # rules from the prompt.
+    "{{repo}}/scripts/role-resolve" common "$role_file" >/dev/null
     team="$("{{repo}}/scripts/coms-setting" PI_COMS_TEAM "{{team_fallback}}")"
     rest=()
     has_model=0
@@ -200,7 +203,7 @@ role name *args:
     test -n "$team" || { echo "--team value must not be empty" >&2; exit 1; }
     model=""
     if [ "$has_model" = 0 ]; then
-      model="$("{{repo}}/scripts/role-field" "$role_file" model)"
+      model="$("{{repo}}/scripts/role-resolve" model "{{name}}" "$role_file")"
     fi
     tools=()
     if [ "$has_tools" = 0 ]; then
@@ -229,12 +232,11 @@ role name *args:
 backoffice *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    role_file="{{repo}}/roles/backoffice.md"
-    common_file="{{repo}}/roles/_common.md"
-    test -f "$role_file" || { echo "role file $role_file not found" >&2; exit 1; }
-    test -f "$common_file" || { echo "shared role file $common_file not found" >&2; exit 1; }
     bo="$("{{repo}}/scripts/coms-setting" PI_BACKOFFICE_DIR "{{backoffice_fallback}}")"
     test -d "$bo" || { echo "backoffice dir $bo not found (set PI_BACKOFFICE_DIR, or PI_BACKOFFICE_DIR in the coms.env settings file)" >&2; exit 1; }
+    # Same lookup as `just role`, with the backoffice dir as the launch dir.
+    role_file="$("{{repo}}/scripts/role-resolve" path backoffice "$bo")"
+    "{{repo}}/scripts/role-resolve" common "$role_file" >/dev/null
     team="$("{{repo}}/scripts/coms-setting" PI_COMS_TEAM "{{team_fallback}}")"
     rest=()
     has_model=0
@@ -254,7 +256,7 @@ backoffice *args:
     test -n "$team" || { echo "--team value must not be empty" >&2; exit 1; }
     model=""
     if [ "$has_model" = 0 ]; then
-      model="$("{{repo}}/scripts/role-field" "$role_file" model)"
+      model="$("{{repo}}/scripts/role-resolve" model backoffice "$role_file")"
     fi
     tools=()
     if [ "$has_tools" = 0 ]; then
@@ -316,8 +318,8 @@ respawn-demo *args="":
 # yours).
 
 # Whole team tiled in one tmux window on the default pool.
-# Session coms-<pool>, one pane per role, per-role models from
-# roles/<name>.md frontmatter. Pane borders carry the role names; prefix-z
+# Session coms-<pool>, one pane per role, per-role models resolved like
+# `just role` (overrides, then the role file frontmatter). Pane borders carry the role names; prefix-z
 # zooms one agent to fullscreen.
 #   just team orchestrator builder scribe researcher
 #   just team --windows orchestrator builder

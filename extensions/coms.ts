@@ -42,6 +42,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import * as crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { pickLevelOneName } from "./naming.ts";
 import { registerComsSetup } from "./coms-setup.ts";
 import { complete } from "@earendil-works/pi-ai/compat";
@@ -779,14 +780,36 @@ export function readFrontmatterFromArgv(argv: string[]): {
 }
 
 /**
+ * Folders holding the shipped `_common.md`, in lookup order: PI_COMS_REPO (the
+ * same override the justfile honours), then the package this file ships in.
+ * A local role (project or user roles dir) without its own `_common.md` falls
+ * back to these.
+ */
+export function sharedRoleDirs(): string[] {
+  const dirs: string[] = [];
+  const repo = (process.env.PI_COMS_REPO ?? "").trim();
+  if (repo) dirs.push(path.join(repo, "roles"));
+  try {
+    dirs.push(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "roles"));
+  } catch {
+    /* not a file URL: only the env override applies */
+  }
+  return dirs;
+}
+
+/**
  * Role identity + shared team rules, read once at session start.
  *
- * `_common.md` is looked up as a sibling of the role file rather than passed as
- * a second --append-system-prompt: two appends land the style rule mid-prompt
- * and split it across two blocks, and pi joins them ahead of the AGENTS.md
- * context files that repeat the same rule in different words.
+ * `_common.md` is looked up next to the role file, else in `fallbackDirs` (the
+ * shipped roles/), rather than passed as a second --append-system-prompt: two
+ * appends land the style rule mid-prompt and split it across two blocks, and pi
+ * joins them ahead of the AGENTS.md context files that repeat the same rule in
+ * different words.
  */
-export function readRoleParts(argv: string[]): { body: string; common: string } {
+export function readRoleParts(
+  argv: string[],
+  fallbackDirs: string[] = sharedRoleDirs(),
+): { body: string; common: string } {
   const p = findRoleFilePath(argv);
   if (!p || !roleFileIsComsOwned(argv)) return { body: "", common: "" };
   let body = "";
@@ -797,9 +820,12 @@ export function readRoleParts(argv: string[]): { body: string; common: string } 
     /* role file unreadable — fall back to hygiene-only prompt */
   }
   try {
-    const sibling = path.join(path.dirname(p), "_common.md");
-    if (fs.existsSync(sibling)) {
-      common = parseFrontmatter(fs.readFileSync(sibling, "utf-8")).body.trim();
+    const candidates = [path.dirname(p), ...fallbackDirs].map((d) =>
+      path.join(d, "_common.md"),
+    );
+    const found = candidates.find((c) => fs.existsSync(c));
+    if (found) {
+      common = parseFrontmatter(fs.readFileSync(found, "utf-8")).body.trim();
     }
   } catch {
     /* no shared rules — role body alone is still valid */

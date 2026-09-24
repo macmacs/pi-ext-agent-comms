@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# Find role files and their models across the three role folders.
+#
+#   scripts/role-resolve path   <role> <launch-dir>   # role file path
+#   scripts/role-resolve common <role-file>           # _common.md to use
+#   scripts/role-resolve model  <role> <role-file>    # effective model (may be empty)
+#   scripts/role-resolve list   <launch-dir>          # one line per visible role:
+#       name<TAB>scope<TAB>path<TAB>model<TAB>source
+#
+# Role folders, first match wins (a match replaces the others completely):
+#   project  <launch-dir>/.pi/coms/roles/
+#   user     $PI_COMS_ROLES_DIR, default ${XDG_CONFIG_HOME:-$HOME/.config}/just/coms-roles/
+#   shipped  <repo>/roles/
+# PI_COMS_ROLES_DIR goes through scripts/coms-setting (env > coms.env).
+#
+# _common.md comes from the role file's own folder, else from the shipped one.
+#
+# Model, highest first (a --model on the CLI is handled by the recipe):
+#   env      PI_COMS_MODEL_<ROLE> (a real export, or a project .env just loaded)
+#   coms.env PI_COMS_MODEL_<ROLE> in the settings file
+#   role     `model:` in the role frontmatter
+# <ROLE> is the role name in upper case with `-` as `_`. That is why role names
+# may only use letters, digits and `-`: `a_b` would share a key with `a-b`.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo="$(dirname "$here")"
+shipped="$repo/roles"
+
+die() { echo "role-resolve: $*" >&2; exit 1; }
+
+valid_name() {
+  case "$1" in
+    "" | -* | *[!A-Za-z0-9-]*) return 1 ;;
+  esac
+  return 0
+}
+
+check_name() {
+  case "$1" in
+    _*) die "'$1' is a shared fragment, not a role" ;;
+  esac
+  valid_name "$1" || die "bad role name '$1' (use letters, digits and -)"
+}
+
+user_dir() {
+  local xdg config_home
+  xdg="${XDG_CONFIG_HOME:-}"
+  case "$xdg" in
+    /*) config_home="$xdg" ;;
+    *)  config_home="${HOME:-/nonexistent}/.config" ;;
+  esac
+  "$here/coms-setting" PI_COMS_ROLES_DIR "$config_home/just/coms-roles"
+}
+
+# Role folders in lookup order, one per line, as scope<TAB>dir.
+role_dirs() {
+  local launch="$1"
+  [ -n "$launch" ] && printf 'project\t%s\n' "$launch/.pi/coms/roles"
+  printf 'user\t%s\n' "$(user_dir)"
+  printf 'shipped\t%s\n' "$shipped"
+}
+
+model_key() {
+  local up
+  up="$(printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_')"
+  printf 'PI_COMS_MODEL_%s' "$up"
+}
+
+# Prints model<TAB>source. Source is env, coms.env, role, or empty.
+model_of() {
+  local name="$1" file="$2" key value
+  key="$(model_key "$name")"
+  value="${!key-}"
+  if [ -n "$value" ]; then printf '%s\tenv' "$value"; return; fi
+  value="$("$here/coms-setting" "$key" "")"
+  if [ -n "$value" ]; then printf '%s\tcoms.env' "$value"; return; fi
+  value="$("$here/role-field" "$file" model)"
+  if [ -n "$value" ]; then printf '%s\trole' "$value"; return; fi
+  printf '\t'
+}
+
+cmd="${1:-}"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  path)
+    name="${1:?usage: role-resolve path <role> <launch-dir>}"
+    launch="${2-}"
+    check_name "$name"
+    while IFS=$'\t' read -r _scope dir; do
+      if [ -f "$dir/$name.md" ]; then
+        printf '%s' "$dir/$name.md"
+        exit 0
+      fi
+    done < <(role_dirs "$launch")
+    {
+      echo "role-resolve: role '$name' not found in:"
+      role_dirs "$launch" | while IFS=$'\t' read -r _scope dir; do echo "  $dir"; done
+    } >&2
+    exit 1
+    ;;
+  common)
+    file="${1:?usage: role-resolve common <role-file>}"
+    sibling="$(dirname "$file")/_common.md"
+    if [ -f "$sibling" ]; then printf '%s' "$sibling"; exit 0; fi
+    [ -f "$shipped/_common.md" ] || die "shared role file $shipped/_common.md not found"
+    printf '%s' "$shipped/_common.md"
+    ;;
+  model)
+    name="${1:?usage: role-resolve model <role> <role-file>}"
+    file="${2:?usage: role-resolve model <role> <role-file>}"
+    check_name "$name"
+    out="$(model_of "$name" "$file")"
+    printf '%s' "${out%%$'\t'*}"
+    ;;
+  list)
+    launch="${1-}"
+    seen=" "
+    while IFS=$'\t' read -r scope dir; do
+      [ -d "$dir" ] || continue
+      for f in "$dir"/*.md; do
+        [ -e "$f" ] || continue
+        n="${f##*/}"; n="${n%.md}"
+        case "$n" in _*) continue ;; esac
+        if ! valid_name "$n"; then
+          echo "role-resolve: skipped $f (bad role name, use letters, digits and -)" >&2
+          continue
+        fi
+        case "$seen" in *" $n "*) continue ;; esac
+        seen="$seen$n "
+        printf '%s\t%s\t%s\t%s\n' "$n" "$scope" "$f" "$(model_of "$n" "$f")"
+      done
+    done < <(role_dirs "$launch")
+    ;;
+  *)
+    die "usage: role-resolve path|common|model|list ..."
+    ;;
+esac

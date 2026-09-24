@@ -48,34 +48,31 @@ set -- ${roles[@]+"${roles[@]}"}
 test -n "$repo" || { echo "coms-team: --repo is required" >&2; exit 1; }
 test -n "$pool" || { echo "coms-team: --pool must not be empty" >&2; exit 1; }
 test -d "$repo/roles" || { echo "coms-team: no roles/ under $repo (set PI_COMS_REPO)" >&2; exit 1; }
+test -x "$repo/scripts/role-resolve" || { echo "coms-team: no scripts/role-resolve under $repo" >&2; exit 1; }
 [ $# -gt 0 ] || { echo "coms-team: name at least one role" >&2; exit 1; }
 # Empty --dir (or a dir that has since gone away) falls back to $HOME rather than
 # letting tmux inherit some unrelated cwd.
 if [ -z "$dir" ] || [ ! -d "$dir" ]; then dir="$HOME"; fi
 
 # Validate every role up front and name every missing file, so a typo'd team
-# fails before any window exists instead of spawning broken peers.
-# roles/_common.md (and any other _-prefixed file) is a shared fragment appended
-# to every role by `just role`, not a launchable role, so it is rejected here and
-# hidden from the available list.
-missing=()
+# fails before any window exists instead of spawning broken peers. Lookup is
+# the same as `just role` (scripts/role-resolve): <dir>/.pi/coms/roles/, the
+# user roles dir, then the shipped roles/. _-prefixed files are shared
+# fragments, not roles, so they are rejected here and hidden from the list.
+# backoffice is only name-checked: its recipe looks it up from
+# PI_BACKOFFICE_DIR, and a miss there still shows in its pane (remain-on-exit).
+resolve="$repo/scripts/role-resolve"
+bad=0
 for r in "$@"; do
   case "$r" in
     _*) echo "coms-team: '$r' is a shared fragment, not a role" >&2; exit 1 ;;
+    backoffice) continue ;;
   esac
-  [ -f "$repo/roles/$r.md" ] || missing+=("$repo/roles/$r.md")
+  "$resolve" path "$r" "$dir" >/dev/null || bad=1
 done
-if [ ${#missing[@]} -gt 0 ]; then
-  echo "coms-team: role file not found:" >&2
-  for m in "${missing[@]}"; do echo "  $m" >&2; done
-  avail=""
-  for f in "$repo/roles"/*.md; do
-    [ -e "$f" ] || continue
-    n="${f##*/}"
-    case "$n" in _*) continue ;; esac
-    avail="$avail ${n%.md}"
-  done
-  echo "available:$avail" >&2
+if [ "$bad" = 1 ]; then
+  avail="$("$resolve" list "$dir" 2>/dev/null | cut -f1 | tr '\n' ' ')"
+  echo "available: ${avail% }" >&2
   exit 1
 fi
 

@@ -60,8 +60,12 @@ function baseEnv(extra = {}) {
     "PI_LEAN_EXCLUDE",
     "PI_COMS_REPO",
     "XDG_CONFIG_HOME",
+    "PI_COMS_ROLES_DIR",
   ]) {
     delete env[key];
+  }
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("PI_COMS_MODEL_")) delete env[key];
   }
   return { ...env, ...extra };
 }
@@ -248,6 +252,68 @@ const teamEnv = justG(xdg, proj, ["team", "orchestrator"], { PI_COMS_TEAM: "from
 include("team: environment beats the file", teamEnv.stdout, "--pool from-env");
 const teamFallback = justG(xdgEmpty, proj, ["team", "orchestrator"]);
 include("team: missing file falls back", teamFallback.stdout, "--pool team");
+
+// ── role lookup and model overrides through the recipes ────────────────────
+
+console.log("\nrecipes: local roles and model overrides");
+const rolesXdg = xdgHome("xdg-roles");
+shimFor(rolesXdg, pkg);
+const rolesProj = scratch("roles-proj");
+const roleMd = (name, model) => `---\nname: ${name}\n${model ? `model: ${model}\n` : ""}---\nbody\n`;
+
+const shippedModel = justG(rolesXdg, rolesProj, ["role", "builder"]);
+include("role: shipped frontmatter model", shippedModel.stdout, "--model litellm/claude-opus-5");
+include("role: shipped role file", shippedModel.stdout, `--role ${path.join(pkg, "roles", "builder.md")}`);
+
+writeFile(path.join(rolesXdg, "just", "coms.env"), "PI_COMS_MODEL_BUILDER=file/override\nPI_COMS_MODEL_SECOPS_DEV=file/secops\n");
+include("role: coms.env model beats frontmatter", justG(rolesXdg, rolesProj, ["role", "builder"]).stdout, "--model file/override");
+include("role: dash role key", justG(rolesXdg, rolesProj, ["role", "secops-dev"]).stdout, "--model file/secops");
+include(
+  "role: env model beats coms.env",
+  justG(rolesXdg, rolesProj, ["role", "builder"], { PI_COMS_MODEL_BUILDER: "env/override" }).stdout,
+  "--model env/override",
+);
+const cliModel = justG(rolesXdg, rolesProj, ["role", "builder", "--model", "cli/m"]);
+check("role: --model on the CLI wins", cliModel.stdout.includes("--model cli/m") && !cliModel.stdout.includes("file/override"), cliModel.stdout);
+
+writeFile(path.join(rolesXdg, "just", "coms-roles", "mine.md"), roleMd("mine", "user/mine"));
+const userRole = justG(rolesXdg, rolesProj, ["role", "mine"]);
+check("role: user role runs", userRole.status === 0, userRole.stderr.slice(0, 300));
+include("role: user role file", userRole.stdout, `--role ${path.join(rolesXdg, "just", "coms-roles", "mine.md")}`);
+include("role: user role model", userRole.stdout, "--model user/mine");
+
+writeFile(path.join(rolesProj, ".pi", "coms", "roles", "mine.md"), roleMd("mine", "proj/mine"));
+include("role: project role beats user role", justG(rolesXdg, rolesProj, ["role", "mine"]).stdout, "--model proj/mine");
+
+const missingRole = justG(rolesXdg, rolesProj, ["role", "ghost"]);
+check("role: missing role fails", missingRole.status !== 0);
+include("role: missing role names the folders", missingRole.stderr, "not found in");
+const badRole = justG(rolesXdg, rolesProj, ["role", "a_b"]);
+include("role: underscore name refused", badRole.stderr, "bad role name");
+
+const boProj = scratch("bo-roles");
+writeFile(path.join(boProj, ".pi", "coms", "roles", "backoffice.md"), roleMd("backoffice", "bo/local"));
+writeFile(path.join(rolesXdg, "just", "coms.env"), `PI_BACKOFFICE_DIR=${boProj}\n`);
+const boLocal = justG(rolesXdg, rolesProj, ["backoffice"]);
+check("backoffice: local role runs", boLocal.status === 0, boLocal.stderr.slice(0, 300));
+include("backoffice: role from the backoffice dir", boLocal.stdout, `--role ${path.join(boProj, ".pi", "coms", "roles", "backoffice.md")}`);
+include("backoffice: its model", boLocal.stdout, "--model bo/local");
+writeFile(path.join(rolesXdg, "just", "coms.env"), `PI_BACKOFFICE_DIR=${boProj}\nPI_COMS_MODEL_BACKOFFICE=file/bo\n`);
+include("backoffice: coms.env model override", justG(rolesXdg, rolesProj, ["backoffice"]).stdout, "--model file/bo");
+
+// The real tmux launcher, stopped right after validation: tmux is stubbed.
+const teamBin = scratch("team-bin");
+writeFile(path.join(teamBin, "tmux"), "#!/usr/bin/env bash\necho TMUX-STUB >&2; exit 0\n", 0o755);
+const runTeam = (roles) =>
+  spawnSync(path.join(REPO, "scripts", "coms-team"), ["--repo", REPO, "--pool", "p", "--dir", rolesProj, ...roles], {
+    encoding: "utf8",
+    env: baseEnv({ XDG_CONFIG_HOME: rolesXdg, PATH: `${teamBin}${path.delimiter}${process.env.PATH}` }),
+  });
+const teamOk = runTeam(["builder", "mine"]);
+check("coms-team: local role passes validation", teamOk.status === 0 && teamOk.stderr.includes("TMUX-STUB"), teamOk.stderr);
+const teamBad = runTeam(["builder", "ghost"]);
+check("coms-team: missing role fails before tmux", teamBad.status !== 0 && !teamBad.stderr.includes("TMUX-STUB"), teamBad.stderr);
+include("coms-team: lists local roles as available", teamBad.stderr, "mine");
 
 console.log(`\n${passed} checks passed, ${failures.length} failed`);
 console.log(`scratch: ${ROOT}`);

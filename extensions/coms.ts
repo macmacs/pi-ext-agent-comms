@@ -45,6 +45,7 @@ import * as crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { pickLevelOneName } from "./naming.ts";
 import { registerComsSetup } from "./coms-setup.ts";
+import { registerComsModels } from "./coms-models.ts";
 import { complete } from "@earendil-works/pi-ai/compat";
 
 // ━━ Constants ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3972,6 +3973,10 @@ export default function (pi: ExtensionAPI) {
   // Wires the global justfile shim (see extensions/coms-setup.ts). Pass this
   // file's own URL: provenance matches the command entry that loaded it.
   registerComsSetup(pi, import.meta.url);
+
+  // ━━ /coms-models slash command ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Per-machine model overrides in coms.env (see extensions/coms-models.ts).
+  registerComsModels(pi);
 
   // ━━ Clean shutdown ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   let shuttingDown = false;

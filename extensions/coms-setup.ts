@@ -416,6 +416,11 @@ function globalJustfilePath(): string {
   return path.join(configHome, "just", "justfile");
 }
 
+/** The per-machine settings file, next to the shim; read by scripts/coms-setting. */
+export function settingsFilePath(): string {
+  return path.join(path.dirname(globalJustfilePath()), SETTINGS_FILE);
+}
+
 /** The literal shim text: ownership marker, then the import. */
 function shimText(pkgRoot: string): string {
   return [
@@ -431,7 +436,7 @@ function shimText(pkgRoot: string): string {
  * behaves exactly like one with no file. scripts/coms-setting parses this
  * format, not a shell.
  */
-function settingsTemplate(): string {
+export function settingsTemplate(): string {
   return [
     "# pi-ext-agent-comms settings.",
     "#",
@@ -453,6 +458,16 @@ function settingsTemplate(): string {
     "# Tools excluded by `just lean`.",
     "#PI_LEAN_EXCLUDE=ctx_purge,ctx_doctor,ctx_stats,ctx_upgrade,ctx_insight,aio-webpull,aio-webquery,aio-webmap,aio-webresearch,aio-webresult,aio-webcontent,mcp,mcpScript",
     "",
+    "# Your own role files. `just role` looks in <launch dir>/.pi/coms/roles/,",
+    "# then here, then the shipped roles/. First match wins.",
+    "#PI_COMS_ROLES_DIR=/home/you/.config/just/coms-roles",
+    "",
+    "# Per-role model overrides for this machine: PI_COMS_MODEL_<ROLE>, the role",
+    "# name in upper case with - as _. Beats `model:` in the role file; --model on",
+    "# the command line still wins. `/coms-models set <role> <model>` edits these.",
+    "#PI_COMS_MODEL_BUILDER=litellm/claude-opus-5",
+    "#PI_COMS_MODEL_SECOPS_DEV=litellm/claude-sonnet-5",
+    "",
   ].join("\n");
 }
 
@@ -460,7 +475,7 @@ function settingsTemplate(): string {
  * Write by rename, never by writing the target directly. Rename replaces a
  * symlink node instead of following it, which is the whole point here.
  */
-function writeAtomic(target: string, content: string): void {
+export function writeAtomic(target: string, content: string): void {
   const tmp = path.join(
     path.dirname(target),
     `.${path.basename(target)}.tmp-${process.pid}-${Date.now().toString(36)}`,

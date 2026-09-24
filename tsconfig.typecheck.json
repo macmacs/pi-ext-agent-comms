@@ -9,5 +9,5 @@
     "strict": false,
     "types": ["node"]
   },
-  "include": ["extensions/coms.ts", "extensions/editor-host.ts", "extensions/naming.ts"]
+  "include": ["extensions/coms.ts", "extensions/editor-host.ts", "extensions/naming.ts", "extensions/coms-models.ts"]
 }

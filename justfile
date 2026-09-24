@@ -102,6 +102,7 @@ check: _node-modules
     node tests/coms-roundtrip.mjs
     node tests/coms-respawn.mjs
     node tests/coms-settings.mjs
+    node tests/coms-models.mjs
     echo "→ check clean"
 
 [doc("Run the git-install harness (network; compares against origin/main)")]

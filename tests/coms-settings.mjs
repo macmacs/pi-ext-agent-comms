@@ -171,11 +171,22 @@ function shimFor(xdg, root) {
   );
 }
 
+// just 1.58 on macOS ignores XDG_CONFIG_HOME for `-g` and reads
+// $HOME/.config/just/justfile, so a scratch XDG dir alone would silently run
+// the real global shim. Every recipe case gets a scratch HOME whose .config IS
+// the XDG dir, so both lookups land on the scratch shim.
+function xdgHome(name) {
+  const dir = path.join(scratch(name), ".config");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 function justG(xdg, cwd, args, env = {}) {
   return spawnSync("just", ["-g", ...args], {
     encoding: "utf8",
     cwd,
     env: baseEnv({
+      HOME: path.dirname(xdg),
       XDG_CONFIG_HOME: xdg,
       PATH: `${bin}${path.delimiter}${process.env.PATH}`,
       ...env,
@@ -183,7 +194,7 @@ function justG(xdg, cwd, args, env = {}) {
   });
 }
 
-const xdg = scratch("xdg");
+const xdg = xdgHome("xdg");
 shimFor(xdg, pkg);
 const bo = scratch("backoffice-dir");
 writeFile(path.join(bo, ".keep"), "");
@@ -205,7 +216,7 @@ const roleProject = justG(xdg, proj, ["role", "builder"]);
 include("role: project .env beats the file", roleProject.stdout, "--project from-project");
 fs.unlinkSync(path.join(proj, ".env"));
 
-const xdgEmpty = scratch("xdg-empty");
+const xdgEmpty = xdgHome("xdg-empty");
 shimFor(xdgEmpty, pkg);
 const roleFallback = justG(xdgEmpty, proj, ["role", "builder"]);
 include("role: missing file falls back", roleFallback.stdout, "--project team");

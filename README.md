@@ -58,12 +58,16 @@ just -g role builder
 
 Start `just -g role scribe` in another terminal to give it someone to talk to.
 Each peer reads its identity (name, color, model, tool budget) from
-`roles/<name>.md` and registers in the default pool.
+`<name>.md` and registers in the default pool. Role files are looked up in
+`./.pi/coms/roles/`, then `~/.config/just/coms-roles/`, then the shipped
+`roles/`, so you can add your own roles or replace a shipped one.
 
 - Tools: `coms_list` (peers and status), `coms_send` (prompt a peer, await its
   reply), plus the respawn tools.
 - TUI: `/coms` opens the pool view, `%agent` talks to one peer directly, Ctrl+O
   expands message details.
+- Models: `/coms-models` lists each role's model. `/coms-models set builder
+  <provider>/<id>` overrides it on this machine only (from the next launch).
 - Respawn replaces a session in place with a fresh context, and a cold respawn
   costs the peer no turn at all. Details in [docs/coms.md](docs/coms.md).
 
@@ -94,6 +98,8 @@ Roles, pools, per-role models and tool budgets live in
 | `PI_COMS_REPO` | the package dir (via `source_directory()`); fallback `$HOME/repos/local/pi-ext-agent-comms` | where `roles/` and `scripts/` are found |
 | `PI_BACKOFFICE_DIR` | `$HOME/repos/backoffice` | the dir `just backoffice` launches in |
 | `PI_COMS_TEAM` | `team` | default pool for `role` / `backoffice` / `team` (override per-run with `--team`) |
+| `PI_COMS_ROLES_DIR` | `${XDG_CONFIG_HOME:-$HOME/.config}/just/coms-roles` | your own role files, looked up after `./.pi/coms/roles/` and before the shipped `roles/` |
+| `PI_COMS_MODEL_<ROLE>` | unset | per-machine model for one role, e.g. `PI_COMS_MODEL_SECOPS_DEV`; beats `model:` in the role file, loses to `--model` |
 | `PI_COMS_MAIN_PANE_WIDTH` | `60%` | width of the main (first role) pane in a tiled `team` / `role-team` |
 | `PI_COMS_CACHE_TTL_MS` | `300000` (5 min) | prompt-cache TTL used for the idle / `cache cold` marker in `coms_list` |
 | `PI_COMS_DIR` | `$HOME/.pi/coms` | root of the registry (`projects/<pool>/agents/*.json`) |
@@ -105,8 +111,9 @@ carry the identity for co-loaded extensions, and give `/reload` a stable name).
 `PI_PARENT_SESSION` is read-only; nothing in this repo or in pi sets it today, so
 every coms agent counts as root.
 
-`PI_COMS_TEAM`, `PI_BACKOFFICE_DIR` and `PI_LEAN_EXCLUDE` (the `just lean`
-denylist) can also live in a settings file next to the shim,
+`PI_COMS_TEAM`, `PI_BACKOFFICE_DIR`, `PI_LEAN_EXCLUDE` (the `just lean`
+denylist), `PI_COMS_ROLES_DIR` and `PI_COMS_MODEL_<ROLE>` can also live in a
+settings file next to the shim,
 `${XDG_CONFIG_HOME:-$HOME/.config}/just/coms.env`; `/coms-setup` writes it once
 as a commented template and never overwrites it. Plain `KEY=value` lines. An
 environment variable always wins, and a project `.env` wins in between when

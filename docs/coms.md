@@ -52,6 +52,8 @@ Tools:
 TUI:
 
 - `/coms` opens the pool view with live status
+- `/coms-models` lists role models; `set <role> <model>` / `unset <role>`
+  edit the per-machine override in `coms.env` (see [team.md](team.md#per-role-models))
 - `%agent` talks to one peer directly
 - Ctrl+O expands message details
 - C-x n / C-x p selects a peer in the pool (C-n/C-p move once selected, Enter

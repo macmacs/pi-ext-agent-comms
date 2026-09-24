@@ -5,7 +5,7 @@ Roles, recipes, pools and tmux. The extension itself is documented in
 
 ## Role files
 
-A role lives in `roles/<name>.md`. Frontmatter sets
+A role lives in `<name>.md`. Frontmatter sets
 name/description/color/model/tools; the body sets that role's own job. Shipped
 roles: `orchestrator`, `builder`, `researcher`, `secops-dev`, `scribe`,
 `backoffice`. `just role <name>` launches any of them in your current directory.
@@ -22,9 +22,38 @@ model: litellm/claude-sonnet-5
 `roles/_common.md` is not a role. It holds what every role shares: writing
 style, the one-line team roster, and the hard rules (secrets never travel,
 backoffice data stays local). It is **not** passed on the command line: `coms.ts`
-finds it as a sibling of the role file. It has no frontmatter, and any
-`_`-prefixed file is rejected as a role name by `just role` and by
-`scripts/coms-team`.
+finds it next to the role file, else in the shipped `roles/`. It has no
+frontmatter, and any `_`-prefixed file is rejected as a role name by
+`just role` and by `scripts/coms-team`.
+
+### Local roles
+
+Role files are looked up in three folders. The first match wins, and it
+replaces the others completely (no field-by-field merge):
+
+| Order | Folder | Use it for |
+|---|---|---|
+| 1 | `<launch dir>/.pi/coms/roles/` | roles that belong to one project; check them in |
+| 2 | `${XDG_CONFIG_HOME:-$HOME/.config}/just/coms-roles/` | your own roles on this machine; move it with `PI_COMS_ROLES_DIR` |
+| 3 | `<package>/roles/` | the shipped roles |
+
+`<launch dir>` is where you run `just role`, the same dir where pi finds
+`.pi/`. For `just backoffice` it is `PI_BACKOFFICE_DIR`.
+
+To change a shipped role, copy it and edit the copy:
+
+```bash
+mkdir -p ~/.config/just/coms-roles
+cp "$(just -g --evaluate repo)/roles/builder.md" ~/.config/just/coms-roles/
+```
+
+`_common.md` works the same way: put one next to your local roles to change the
+team rules for them. Without one, they use the shipped `_common.md`.
+
+Role names may only use letters, digits and `-`. `_` is refused, because the
+model key for `a_b` would be the same as for `a-b` (see below).
+`scripts/role-resolve` is the one place that does the lookup;
+`just role`, `just backoffice`, `just team` and `/coms-models` all call it.
 
 The role text goes in through coms' own `--role` flag. For why that matters, see
 [coms.md](coms.md).
@@ -171,6 +200,39 @@ It is a **default**, not a pin: an explicit `--model` (or `--provider`) on the
 command line suppresses it, and a role file without a `model:` key falls back to
 your `defaultModel` setting exactly as before.
 
+### Per-machine overrides
+
+Different machines can see different model catalogues. Override a role's model
+on one machine without touching the role file, with `PI_COMS_MODEL_<ROLE>`:
+the role name in upper case, `-` as `_`.
+
+```bash
+# ~/.config/just/coms.env
+PI_COMS_MODEL_BUILDER=openrouter/x-ai/grok-5
+PI_COMS_MODEL_SECOPS_DEV=litellm/claude-sonnet-4-6
+```
+
+Or from inside pi:
+
+```
+/coms-models                                  # every role, its model, and where it came from
+/coms-models set builder openrouter/x-ai/grok-5
+/coms-models unset builder
+```
+
+`set` warns (and still writes) when pi does not know the model, since it may
+exist on another machine or behind a proxy. It creates `coms.env` from the
+template if it is missing, and writes through a symlinked `coms.env`. The change
+applies from the next launch; the running session keeps its model.
+
+What wins, highest first:
+
+1. `--model` / `--provider` on the command line
+2. `PI_COMS_MODEL_<ROLE>` in the environment (or a project `.env` just loaded)
+3. `PI_COMS_MODEL_<ROLE>` in `coms.env`
+4. `model:` in the role file
+5. pi's `defaultModel`
+
 ```bash
 just role builder                                    # litellm/claude-opus-5 (from builder.md)
 just role scribe                                     # litellm/claude-sonnet-5 (from scribe.md)
@@ -196,7 +258,7 @@ demanding agentic work. Edit the role files to suit your own catalogue -
 your `enabledModels` setting (that only scopes Ctrl+P cycling, not `--model`).
 
 Read at **launch** time by `just role` / `just backoffice` (via
-`scripts/role-field`), so the session starts on the right model rather than
+`scripts/role-resolve`), so the session starts on the right model rather than
 switching after the first turn, and the choice survives `coms_respawn`. A bare
 `pi -e extensions/coms.ts` takes no role file, so peers launched that way stay on
 your default model.

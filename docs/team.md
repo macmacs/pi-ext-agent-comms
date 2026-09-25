@@ -19,12 +19,15 @@ model: litellm/claude-sonnet-5
 ---
 ```
 
-`roles/_common.md` is not a role. It holds what every role shares: writing
-style, the one-line team roster, and the hard rules (secrets never travel,
-backoffice data stays local). It is **not** passed on the command line: `coms.ts`
-finds it next to the role file, else in the shipped `roles/`. It has no
-frontmatter, and any `_`-prefixed file is rejected as a role name by
-`just role` and by `scripts/coms-team`.
+`roles/_common.md` is not a role. It holds what every agent shares: the register
+(how to write), the one-line team roster, and the hard rules - secrets never
+travel, backoffice data stays local, how to report and how to hand off. It is
+**not** passed on the command line: `coms.ts` finds it next to the role file,
+else in the shipped `roles/`, and it is injected even when no role file was
+passed at all, because those rules belong to the team and not to one role. The
+hard rules land at the **end** of the prompt block on purpose: what the model
+reads last is what it obeys. It has no frontmatter, and any `_`-prefixed file is
+rejected as a role name by `just role` and by `scripts/coms-team`.
 
 ### Local roles
 
@@ -48,7 +51,9 @@ cp "$(just -g --evaluate repo)/roles/builder.md" ~/.config/just/coms-roles/
 ```
 
 `_common.md` works the same way: put one next to your local roles to change the
-team rules for them. Without one, they use the shipped `_common.md`.
+team rules for those roles. Without one, they use the shipped `_common.md`. A
+peer launched **without** a role file has no sibling folder to look in, so it
+always uses the shipped one (or `PI_COMS_REPO/roles`).
 
 Role names may only use letters, digits and `-`. `_` is refused, because the
 model key for `a_b` would be the same as for `a-b` (see below).

@@ -192,8 +192,8 @@ note is that session's first user message.
 
 Both launchers pass the role file with coms' own `--role` flag, **not**
 `--append-system-prompt`. `coms.ts` then assembles ONE block - identity, role
-body, team rules, session hygiene - and returns it from `before_agent_start`, so
-it lands at the very **end** of the system prompt.
+body, session hygiene, shared rules - and returns it from `before_agent_start`,
+so it lands at the very **end** of the system prompt.
 
 This matters because of how pi builds the prompt:
 
@@ -219,8 +219,30 @@ Side effects of moving to `--role`:
   `--append-system-prompt` reads the file verbatim; `coms.ts` strips it.
 - Identity and shared rules are one block with one heading tree, not two
   disconnected appends.
-- Style is stated once, at the tail, with an explicit note that it overrides the
-  tool guidelines above it.
+- The register is stated once, in the shared rules, with an explicit note that
+  it overrides the tool guidelines above it.
+
+### Order inside the block
+
+What the model reads last is what it obeys. The block runs identity -> role body
+-> session hygiene -> shared rules, and `_common.md` is written with its
+non-negotiables (secrets, data locality, the truth rules for talking to peers)
+as the last section. `tests/coms-core.mjs` asserts both the order and a size
+budget, because both are easy to lose in a reword.
+
+An earlier order put the shared rules before hygiene. That buried "secrets never
+travel" mid-block behind a 665-char section on reporting, and handed the recency
+slot to the longest, least-critical text.
+
+`_common.md` loads with **or without** a role file (`readSharedCommon`): the
+rules travel with the extension, not with the role. That is what lets one copy
+of the register live in this repo instead of being restated in every agent's
+global prompt file, where it was outranked anyway. A bare peer - no `--role` -
+still gets the register, the roster and the hard rules.
+
+Cost of the block, real files, per turn: 3.2k chars for builder and
+orchestrator, 3.4k for secops-dev, 3.6k for backoffice. It was 4.1k to 4.6k
+before the reword.
 
 `--system-prompt` and `--append-system-prompt` still work for older launchers:
 `coms.ts` reads identity frontmatter from them as before and appends only the
@@ -229,4 +251,6 @@ hygiene block, so the role body is never injected twice.
 Respawn advice is not stored in the role files either. `coms.ts` generates the
 session hygiene block and tailors it per role (the orchestrator gets the
 cold-respawn-your-peers line, everyone else gets the respawn-yourself lines), so
-duplicating it in a role file only wastes tokens.
+duplicating it in a role file only wastes tokens. The same holds for the "ask
+secops-dev to run the gated step, never for the value" line: it lives in the
+shared rules once, not in every role that might want a secret.

@@ -22,6 +22,3 @@ That directory is your ground truth. Follow its `AGENTS.md`:
   info wins when it conflicts with an external source.
 
 Say what the knowledge base actually says. If it is not in there, say that.
-
-Business data and credentials in this directory stay local. Return the answer, a
-summary, or a redacted copy - never the raw source material.

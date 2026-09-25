@@ -279,6 +279,62 @@ check(
   JSON.stringify(coms.sharedRoleDirs()),
 );
 
+// ━━ the coms prompt block ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// One block, appended last, re-sent on every turn of every agent. Its ORDER is
+// what makes the hard rules land (what the model reads last is what it obeys)
+// and its SIZE is the tax every peer pays per turn. Both are asserted here so
+// neither can drift back.
+
+check("readSharedCommon: reads a shared _common", coms.readSharedCommon([sharedDir]) === "shipped rules", coms.readSharedCommon([sharedDir]));
+check(
+  "readSharedCommon: no candidate dir gives empty",
+  coms.readSharedCommon([path.join(ROOT, "no-such-dir")]) === "",
+  JSON.stringify(coms.readSharedCommon([path.join(ROOT, "no-such-dir")])),
+);
+const shippedRules = coms.readSharedCommon([path.join(REPO, "roles")]);
+check("readSharedCommon: the shipped roles/_common.md parses", shippedRules.startsWith("## Team"), shippedRules.slice(0, 40));
+
+const builderBody = coms.readRoleParts(["--role", path.join(REPO, "roles", "builder.md")]).body;
+const block = coms.assembleComsPrompt({
+  name: "builder",
+  role: builderBody,
+  common: shippedRules,
+  hygiene: coms.assembleSessionHygiene({ cacheTtlMin: 5, isOrchestrator: false }),
+});
+
+check("assembleComsPrompt: opens with the identity line", block.startsWith("# You are a coms agent\n\nYou are `builder`."), block.slice(0, 60));
+const at = (needle) => block.indexOf(`\n${needle}`);
+check(
+  "assembleComsPrompt: role, then hygiene, then the shared rules",
+  at("## Your role") > 0 && at("## Session hygiene") > at("## Your role") && at("## Team") > at("## Session hygiene"),
+  JSON.stringify({ role: at("## Your role"), hygiene: at("## Session hygiene"), team: at("## Team") }),
+);
+check(
+  "assembleComsPrompt: hard rules are the last section (recency slot)",
+  block.lastIndexOf("\n## ") === at("## Hard rules"),
+  block.slice(block.lastIndexOf("\n## ")),
+);
+check(
+  "assembleComsPrompt: the two non-negotiables survive the rewrite",
+  block.includes("Secrets never travel") && block.includes("Backoffice data stays local"),
+);
+const bare = coms.assembleComsPrompt({
+  name: "dev",
+  role: "",
+  common: "",
+  hygiene: coms.assembleSessionHygiene({ cacheTtlMin: 5, isOrchestrator: false }),
+});
+check(
+  "assembleComsPrompt: no role file, no empty sections",
+  !bare.includes("## Your role") &&
+    !bare.includes("## Team") &&
+    bare.trimEnd().endsWith("cold:true only parks you for another agent to wake."),
+  bare,
+);
+// The tax: the whole block, real shipped rules and a real role body, has to stay
+// under this. Raise the number in the same commit as whatever earns it.
+check("coms prompt block: stays under the 3600 char budget", block.length <= 3600, `block is ${block.length} chars`);
+
 // ━━ turn initiator ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 check("findTurnInitiator: empty branch is null", coms.findTurnInitiator([]) === null);

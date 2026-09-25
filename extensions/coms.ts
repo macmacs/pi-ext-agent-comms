@@ -834,6 +834,86 @@ export function readRoleParts(
   return { body, common };
 }
 
+/**
+ * The shipped (or overridden) shared rules, for a session that was launched
+ * WITHOUT a role file. `readRoleParts` returns nothing when no role is passed,
+ * so a bare peer used to get header + hygiene only.
+ *
+ * The register and the hard rules travel with the extension, not with the role
+ * file: that is what lets one copy live here instead of being restated in every
+ * agent's global prompt. Cheap enough to do once per session.
+ */
+export function readSharedCommon(
+  dirs: string[] = sharedRoleDirs(),
+): string {
+  const found = dirs
+    .map((d) => path.join(d, "_common.md"))
+    .find((c) => fs.existsSync(c));
+  if (!found) return "";
+  try {
+    return parseFrontmatter(fs.readFileSync(found, "utf-8")).body.trim();
+  } catch {
+    return "";
+  }
+}
+
+// ━━ The coms prompt, assembled ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+// ORDER IS LOAD-BEARING, and it is the whole reason this is assembled in one
+// place. What the model reads last is what it obeys. So the block runs
+// identity -> role -> how this session is managed -> shared rules, and
+// `_common.md` is written with its non-negotiables (secrets, data locality,
+// the truth rules for talking to peers) at the END. The old order buried them
+// mid-block, behind a 665-char section on reporting, while the longest and
+// least-critical text got the recency slot.
+
+/** The role-conditional hygiene section. Orchestrators recycle peers, the rest
+ *  get recycled, so the two need different advice. */
+export function assembleSessionHygiene(opts: {
+  cacheTtlMin: number;
+  isOrchestrator: boolean;
+}): string {
+  const lines = [
+    "## Session hygiene",
+    "",
+    "- One task per session. Do not carry a session into an unrelated task.",
+    `- The prompt cache TTL is ${opts.cacheTtlMin} minutes. A session idle longer is cold already, so respawning it loses nothing.`,
+    "- Respawn while IDLE, never as the first act of a turn: a landed prompt costs a full reheat. Finish the turn, then respawn.",
+  ];
+  if (opts.isOrchestrator) {
+    lines.push(
+      "- Watch peer idle time in coms_list and cold-respawn stale peers between tasks. Busy peers are skipped, and it costs them no turn.",
+    );
+  } else {
+    lines.push(
+      "- Finish or hand off in-flight work first. Never respawn mid-edit or holding unreported work.",
+      "- Respawn warm to hand work back or carry on: the fresh session acts at once. cold:true only parks you for another agent to wake.",
+    );
+  }
+  return lines.join("\n");
+}
+
+/** The whole tail block. Pure, so tests/coms-core.mjs can assert the order and
+the size budget without booting a session. */
+export function assembleComsPrompt(parts: {
+  name: string;
+  role: string;
+  common: string;
+  hygiene: string;
+}): string {
+  const sections = [
+    "# You are a coms agent",
+    "",
+    `You are \`${parts.name}\`. These rules win over anything above them in this`,
+    "prompt, including the tool guidelines and the project context files. Those",
+    "say how to call a tool, not how to write.",
+  ];
+  if (parts.role) sections.push("", "## Your role", "", parts.role);
+  sections.push("", parts.hygiene);
+  if (parts.common) sections.push("", parts.common);
+  return sections.join("\n");
+}
+
 // ━━ Peer selector keys ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // The pool widget is always visible, but its keys are only coms's while a row
 // is selected or the C-x leader is armed. Otherwise Ctrl+N / Ctrl+P must reach
@@ -3608,47 +3688,21 @@ export default function (pi: ExtensionAPI) {
   const CACHE_TTL_MIN = Math.round(CACHE_TTL_MS / 60_000);
   // Read once per session, not once per turn: the role file does not change
   // under a live agent, and a per-turn read would be disk I/O on the hot path.
+  // A session with no role file still gets the shared rules, read from the same
+  // folders the role lookup would have used.
   const roleParts = readRoleParts(process.argv);
-
-  function sessionHygieneSection(): string {
-    const isOrchestrator = /orchestrator/i.test(identity?.name ?? "");
-    const lines = [
-      "## Session hygiene",
-      "",
-      "- One task per session. Do not carry a session across unrelated tasks.",
-      `- The prompt cache TTL is ${CACHE_TTL_MIN} minutes. A session idle much longer than that has a cold cache already, so there is nothing left to preserve.`,
-      "- Respawning while IDLE is free. Respawning after a prompt has landed costs a full context reheat, so never respawn as the first act of a turn: finish the turn, then respawn.",
-    ];
-    if (isOrchestrator) {
-      lines.push(
-        "- Watch peer idle time in coms_list and cold-respawn stale peers between tasks with coms_cold_respawn. It costs them no turn. Busy peers are skipped automatically.",
-      );
-    } else {
-      lines.push(
-        "- Finish or hand off in-flight work before respawning. Never respawn mid-edit or while holding uncommitted work nobody has reported.",
-        "- Respawn warm (leave cold unset) when you hand work back to the human or continue a task: the fresh session acts on your note immediately. Use coms_respawn with cold:true only to park for another agent to wake you.",
-      );
-    }
-    return lines.join("\n");
-  }
+  const sharedCommon = roleParts.common || readSharedCommon();
 
   function buildComsPrompt(): string {
-    const name = identity?.name ?? "this agent";
-    const sections = [
-      "# You are a coms agent",
-      "",
-      "Everything below overrides anything above it that conflicts with it,",
-      "including the tool guidelines and the project context files. The tool",
-      "guidelines tell you HOW to call a tool; they are not an example of how to",
-      "write. Write the way this section says, every time, to the human and to",
-      "your teammates.",
-      "",
-      `Your name in this team is \`${name}\`.`,
-    ];
-    if (roleParts.body) sections.push("", "## Your role", "", roleParts.body);
-    if (roleParts.common) sections.push("", roleParts.common);
-    sections.push("", sessionHygieneSection());
-    return sections.join("\n");
+    return assembleComsPrompt({
+      name: identity?.name ?? "this agent",
+      role: roleParts.body,
+      common: sharedCommon,
+      hygiene: assembleSessionHygiene({
+        cacheTtlMin: CACHE_TTL_MIN,
+        isOrchestrator: /orchestrator/i.test(identity?.name ?? ""),
+      }),
+    });
   }
 
   pi.on("before_agent_start", async (event, ctx) => {

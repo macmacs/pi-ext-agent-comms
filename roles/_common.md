@@ -43,3 +43,15 @@ the same register as a message to the human.
 - Do not guess. If you do not know, say so and name who would know.
 - Answer the question you were asked, then stop. Do not loop. Say when your part
   is done.
+
+## Messages between agents
+
+- Report state you read in this turn. A remembered SHA is stale when you send it.
+- Name files by content hash, not commit SHA. Hashes survive an amend.
+- When an id is superseded, say "X is retired", or someone derives it again.
+- One owner per file. Others propose a diff and route it to the orchestrator. A
+  revert (`git checkout --`) is a write too.
+- When what you see contradicts your instruction, stop and escalate.
+- When evidence contradicts your conclusion, run the test that could falsify it.
+- Answer every flagged question before you hand out new work.
+- Wait for the reply before you act on it. If you already acted, say so.

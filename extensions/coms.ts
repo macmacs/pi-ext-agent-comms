@@ -3679,13 +3679,20 @@ export default function (pi: ExtensionAPI) {
   //   by ~5k chars of AGENTS.md and skill listings that follow it, and dwarfed
   //   by ~13k chars of dense tool guidelines ahead of it. Splitting identity
   //   and shared rules across two appends made it two soft hints instead of one
-  //   rule. before_agent_start runs after the whole prompt is built, so what we
-  //   return here is genuinely last.
+  //   rule. Custom sections render after cwd, so the block is genuinely last.
   //
-  // Returned from before_agent_start, which chains per turn and is NOT stored
-  // in the session, so it cannot accumulate across turns the way an injected
-  // message would.
+  // Why a section and not `return { systemPrompt }`:
+  //   A returned systemPrompt is a per-run force. pi drops it when the run
+  //   ends, and a run started by pi.sendMessage(..., { triggerTurn: true })
+  //   (every coms-inbound on an idle agent) skips before_agent_start, so that
+  //   run went out WITHOUT this block. The system prompt flipped between runs
+  //   and every flip cost a prompt-cache miss after the tool list. A section
+  //   is recorded in the transcript's system message (pi appends a delta only
+  //   when the text changes), so every run replays the same bytes, however it
+  //   was started. Constant text -> no delta after the first turn.
   const CACHE_TTL_MIN = Math.round(CACHE_TTL_MS / 60_000);
+  // Tag name of the coms block in the system prompt: renders as <coms>...</coms>.
+  const COMS_PROMPT_SECTION = "coms";
   // Read once per session, not once per turn: the role file does not change
   // under a live agent, and a per-turn read would be disk I/O on the hot path.
   // A session with no role file still gets the shared rules, read from the same
@@ -3714,8 +3721,17 @@ export default function (pi: ExtensionAPI) {
         /* ignore */
       }
     }
-    // Chain onto the prompt as it stands for this handler, so other extensions'
-    // changes are preserved.
+    // Mutate the shared options in place: later handlers see it, and pi
+    // records it in the transcript. Do not return systemPrompt (see above).
+    // `sections` is missing from the pinned dev types (0.84.3) and from old pi
+    // builds; there, fall back to the per-run force so the block still lands.
+    const sections = (
+      event.systemPromptOptions as { sections?: Record<string, string> }
+    ).sections;
+    if (sections) {
+      sections[COMS_PROMPT_SECTION] = buildComsPrompt();
+      return;
+    }
     return {
       systemPrompt: `${event.systemPrompt}\n\n${buildComsPrompt()}`,
     };

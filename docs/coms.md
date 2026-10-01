@@ -192,8 +192,9 @@ note is that session's first user message.
 
 Both launchers pass the role file with coms' own `--role` flag, **not**
 `--append-system-prompt`. `coms.ts` then assembles ONE block - identity, role
-body, session hygiene, shared rules - and returns it from `before_agent_start`,
-so it lands at the very **end** of the system prompt.
+body, session hygiene, shared rules - and adds it in `before_agent_start` as the
+custom system prompt section `coms`. Custom sections render after `cwd`, so it
+lands at the very **end** of the system prompt, wrapped in `<coms>...</coms>`.
 
 This matters because of how pi builds the prompt:
 
@@ -204,8 +205,19 @@ appendSystemPrompt               <-- role text used to land HERE, mid-prompt
 <project_context> (AGENTS.md)    ~2.1k
 <available_skills>               ~3.1k
 cwd
-<-- before_agent_start output lands HERE, genuinely last
+<coms>...</coms>                 <-- the coms block lands HERE, genuinely last
 ```
+
+It is a section, not a returned `systemPrompt`, on purpose. A returned
+`systemPrompt` is a per-run force that pi drops when the run ends. A run that
+`pi.sendMessage(..., { triggerTurn: true })` starts (every coms-inbound on an
+idle agent) skips `before_agent_start`, so that run went out without the block.
+The system prompt flipped between user runs and inbound runs, and each flip
+cost a prompt-cache miss after the tool list. A section is stored in the
+transcript's system message, so every run sends the same bytes.
+
+Any other extension that returns `systemPrompt` from `before_agent_start`
+brings the flip back (condensed-milk does, with its `[cm-masked]` explainer).
 
 With `--append-system-prompt` the role was 2% of the prompt, buried behind ~13k
 chars of dense tool guidelines and outranked on recency by the ~5k chars of

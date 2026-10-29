@@ -2925,20 +2925,35 @@ export default function (pi: ExtensionAPI) {
     }
 
     const effectiveSel = selectedIndex < rows.length ? selectedIndex : -1;
-    const out: string[] = [];
+    const cells: string[] = [];
+
+    // Use └ icon + indent when this is a tree node below the top row:
+    //   depth > 1: any deeply nested agent (grandchild+ from root's view)
+    //   depth === 1 AND relationship !== "child": sibling's child visible from non-root
+    // Use relationship icon otherwise (depth 0, or depth 1 direct own child → ↓).
+    const usesRelIcon = (r: (typeof rows)[number]): boolean =>
+      r.depth === 0 || (r.depth === 1 && r.relationship === "child");
+    const indentOf = (r: (typeof rows)[number]): string =>
+      usesRelIcon(r) ? "" : "  ".repeat(Math.max(1, r.depth - 1));
+    // padEnd counts code units; pad by terminal width so wide glyphs align.
+    const padVisible = (s: string, w: number): string =>
+      s + " ".repeat(Math.max(0, w - visibleWidth(s)));
+
+    // Size the name/model columns to the widest entry so cells stay compact.
+    const nameW = Math.max(
+      ...rows.map((r) => visibleWidth(indentOf(r) + r.name)),
+    );
+    const modelW = Math.max(
+      ...rows.map((r) => visibleWidth(abbreviateModel(r.model))),
+    );
 
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i]!;
       const isSelected = i === effectiveSel;
       const pctLabel = r.pct == null ? "--%" : `${r.pct}%`;
 
-      // Use └ icon + indent when this is a tree node below the top row:
-      //   depth > 1: any deeply nested agent (grandchild+ from root's view)
-      //   depth === 1 AND relationship !== "child": sibling's child visible from non-root
-      // Use relationship icon otherwise (depth 0, or depth 1 direct own child → ↓).
-      const useRelIcon =
-        r.depth === 0 || (r.depth === 1 && r.relationship === "child");
-      const indent = useRelIcon ? "" : "  ".repeat(Math.max(1, r.depth - 1));
+      const useRelIcon = usesRelIcon(r);
+      const indent = indentOf(r);
       const relIcon = useRelIcon
         ? theme.fg(
             "dim",
@@ -2949,12 +2964,14 @@ export default function (pi: ExtensionAPI) {
         : theme.fg("dim", "└");
 
       if (r.stale) {
-        const dimRow = `✗ ${indent}${r.name.padEnd(11)} ${abbreviateModel(r.model).padEnd(16)}  ${pctLabel.padStart(4)}  —  ${r.purpose || ""}`;
-        const truncated = truncateToWidth(
-          (isSelected ? "❯ " : "  ") + theme.fg("dim", dimRow),
-          width,
-        );
-        out.push(isSelected ? theme.bold(truncated) : truncated);
+        // Same lead as live rows (marker, space, icon) so columns line up.
+        const dimRow = `${padVisible(indent + r.name, nameW)}  ${padVisible(abbreviateModel(r.model), modelW)}  ${pctLabel.padStart(4)}`;
+        const cell =
+          (isSelected ? "❯ " : "  ") +
+          theme.fg("dim", "✗ ") +
+          relIcon +
+          theme.fg("dim", dimRow);
+        cells.push(isSelected ? theme.bold(cell) : cell);
         continue;
       }
 
@@ -2974,30 +2991,45 @@ export default function (pi: ExtensionAPI) {
               ? theme.fg("dim", "●")
               : hexFg(r.color, "●");
       const namePart = !useRelIcon
-        ? theme.fg("dim", (indent + r.name).padEnd(11 + indent.length))
-        : theme.fg("accent", r.name.padEnd(11));
-      const modelPart = theme.fg("dim", abbreviateModel(r.model).padEnd(16));
+        ? theme.fg("dim", padVisible(indent + r.name, nameW))
+        : theme.fg("accent", padVisible(r.name, nameW));
+      const modelPart = theme.fg(
+        "dim",
+        padVisible(abbreviateModel(r.model), modelW),
+      );
       const pctPart = theme.fg(
         r.pending ? "dim" : "accent",
         pctLabel.padStart(4),
       );
-      const sep = theme.fg("dim", "  —  ");
-      const purposePart = theme.fg("muted", r.purpose || "");
 
-      const rawLine =
+      const cell =
         (isSelected ? "❯ " : "  ") +
         swatch +
         " " +
         relIcon +
         namePart +
-        " " +
+        "  " +
         modelPart +
-        " " +
-        pctPart +
-        sep +
-        purposePart;
-      const truncated = truncateToWidth(rawLine, width);
-      out.push(isSelected ? theme.bold(truncated) : truncated);
+        "  " +
+        pctPart;
+      cells.push(isSelected ? theme.bold(cell) : cell);
+    }
+
+    // Flow the cells left to right and wrap when the line is full. All cells
+    // share one width so the wrapped lines stay aligned. Few agents fit on
+    // one line; a narrow terminal falls back to one cell per line.
+    const cellW = Math.max(...cells.map((c) => visibleWidth(c)));
+    const gap = 4;
+    const perLine = Math.max(1, Math.floor((width + gap) / (cellW + gap)));
+    const out: string[] = [];
+    for (let i = 0; i < cells.length; i += perLine) {
+      const line = cells
+        .slice(i, i + perLine)
+        .map((c, j, arr) =>
+          j < arr.length - 1 ? padVisible(c, cellW + gap) : c,
+        )
+        .join("");
+      out.push(truncateToWidth(line, width));
     }
 
     return out;

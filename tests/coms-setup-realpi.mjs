@@ -98,8 +98,22 @@ async function driveRpc() {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // Wait for the real exit, not a fixed delay: a slow CI runner can take
+      // longer than a second to shut pi down. A pi that truly hangs still
+      // fails after 10s. exitCode is null on a signal death, so fall back to
+      // the signal name.
+      const done = (code, signal) =>
+        resolve({ stdout, stderr, exitCode: code ?? (signal ? `signal ${signal}` : null) });
+      if (child.exitCode !== null || child.signalCode !== null) {
+        done(child.exitCode, child.signalCode);
+        return;
+      }
+      const cap = setTimeout(() => done(null, null), 10000);
+      child.once("exit", (code, signal) => {
+        clearTimeout(cap);
+        done(code, signal);
+      });
       child.kill("SIGTERM");
-      setTimeout(() => resolve({ stdout, stderr, exitCode: child.exitCode }), 1500);
     };
     const timer = setTimeout(finish, 40000);
     child.stdout.on("data", (d) => {

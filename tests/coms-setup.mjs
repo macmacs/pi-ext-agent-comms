@@ -156,7 +156,9 @@ async function freshShim() {
 
   include("reports the wiring", res.out, `wired ${shim} -> ${pkg}  (coms-setup-shim v1)`);
   include("reports the install identity", res.out, `loaded as a package install (${pkg}, scope user)`);
-  include("reports just version", res.out, "just 1.58.0");
+  // The installed just, not a pinned number: CI images bump it under us.
+  const justVer = (execJust(["--version"], xdg).stdout.match(/just (\d+\.\d+\.\d+)/) ?? [])[1];
+  include("reports just version", res.out, `just ${justVer}`);
   include("warns about dev deps", res.out, "just typecheck: dev deps missing");
   include("tells the user what to run", res.out, "run: just -g --list");
   check("info kind", res.last?.kind === "info", res.last?.kind);

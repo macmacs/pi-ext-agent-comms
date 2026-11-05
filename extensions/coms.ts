@@ -101,7 +101,8 @@ type EnvelopeType =
   | "ping"
   | "tree_ping"
   | "respawn_request"
-  | "respawn_cold";
+  | "respawn_cold"
+  | "interrupt";
 
 interface Envelope {
   type: EnvelopeType;
@@ -140,6 +141,17 @@ interface RespawnColdEnvelope extends Envelope {
   sender_name: string;
   sender_cwd: string;
   conversation_id?: string | null;
+}
+
+// Interrupt: the sender stops the peer's current turn and drops every coms
+// message still waiting in the peer's inbox, then (optionally) hands it one
+// fresh prompt. Exists because queued messages go stale: without it a peer
+// works through old orders one by one after the plan has changed.
+interface InterruptEnvelope extends Envelope {
+  type: "interrupt";
+  prompt?: string | null;
+  sender_name: string;
+  sender_cwd: string;
 }
 
 interface PingEnvelope extends Envelope {
@@ -261,6 +273,57 @@ export function findTurnInitiator(branch: any[]): any | null {
     // assistant / toolResult are turn output — keep walking back
   }
   return null;
+}
+
+// ━━ Inbox ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// A coms message that arrived while the agent was busy. coms holds these
+// itself instead of handing them to pi's follow-up queue, because an
+// extension cannot clear pi's queue: once a message is in there, the agent
+// will run it, however stale it is. In our own inbox, coms_interrupt can drop
+// them.
+export interface InboxItem {
+  msg_id: string;
+  hops: number;
+  sender_name: string;
+  content: string;
+}
+
+// The message an interrupted agent reads. Says who interrupted, whether a
+// turn was stopped, and which queued messages were dropped (so the agent
+// knows they existed and can ask the sender if one still matters).
+export function formatInterruptNotice(opts: {
+  sender: string;
+  prompt: string | null;
+  aborted: boolean;
+  dropped: Pick<InboxItem, "msg_id" | "sender_name">[];
+}): string {
+  const lines: string[] = [];
+  lines.push(
+    opts.prompt
+      ? `[coms · INTERRUPT from ${opts.sender} · reply via coms_send target="${opts.sender}" if needed]`
+      : `[coms · INTERRUPT from ${opts.sender}]`,
+  );
+  lines.push("");
+  lines.push(
+    opts.aborted
+      ? `${opts.sender} stopped your turn. Do not resume that work unless told to.`
+      : `${opts.sender} interrupted you.`,
+  );
+  if (opts.dropped.length > 0) {
+    const list = opts.dropped
+      .map((d) => `${d.sender_name} (${d.msg_id})`)
+      .join(", ");
+    lines.push(
+      `Dropped ${opts.dropped.length} queued coms message(s) unread: ${list}. They are stale; ask the sender if one still matters.`,
+    );
+  }
+  if (opts.prompt) {
+    lines.push("");
+    lines.push(opts.prompt);
+  } else {
+    lines.push("Wait for new instructions.");
+  }
+  return lines.join("\n");
 }
 
 // ━━ Helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1072,6 +1135,9 @@ export default function (pi: ExtensionAPI) {
   let widgetVisible = true;
   let agentRunning = false;
   let agentBlocked = false;
+  // Coms messages that arrived while busy, oldest first. Pumped one per
+  // settle on agent_settled; coms_interrupt empties it. See InboxItem.
+  const inbox: InboxItem[] = [];
   // When this agent's last turn ended. null until the first turn completes, so a
   // fresh or cold-respawned session reports as fully idle rather than busy.
   let lastTurnEndAt: string | null = null;
@@ -1159,6 +1225,56 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  // True when a new run can start right now. ctx.isIdle() flips to false
+  // synchronously inside pi.sendMessage(triggerTurn), so two inbounds in a
+  // row cannot both start a run.
+  function canDeliverNow(): boolean {
+    if (agentRunning || respawning) return false;
+    try {
+      return currentCtx ? currentCtx.isIdle() : true;
+    } catch {
+      return true;
+    }
+  }
+
+  // Start a turn with one inbox item. hops rides in details so agent_start
+  // can arm currentInbound for hop-count inheritance. deliverAs followUp is a
+  // safety net only: if pi turns out to be busy after all, pi queues it.
+  function deliverInbound(item: InboxItem): void {
+    pi.sendMessage(
+      {
+        customType: "coms-inbound",
+        content: item.content,
+        display: true,
+        details: {
+          msg_id: item.msg_id,
+          hops: item.hops,
+          sender_name: item.sender_name,
+        },
+      },
+      { deliverAs: "followUp", triggerTurn: true },
+    );
+  }
+
+  // Deliver now when idle, else hold in the inbox until the agent settles.
+  function enqueueInbound(item: InboxItem): void {
+    if (inbox.length === 0 && canDeliverNow()) {
+      deliverInbound(item);
+      return;
+    }
+    inbox.push(item);
+  }
+
+  function pumpInbox(): void {
+    if (inbox.length === 0 || !canDeliverNow()) return;
+    const next = inbox.shift()!;
+    try {
+      deliverInbound(next);
+    } catch {
+      inbox.unshift(next);
+    }
+  }
+
   function handlePrompt(socket: net.Socket, env: PromptEnvelope): void {
     // 1. Hop limit check
     if (typeof env.hops !== "number" || env.hops >= MAX_HOPS) {
@@ -1166,22 +1282,13 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    // Steer the receiver immediately. hops is stored in details so agent_start
-    // can arm currentInbound for hop-count inheritance.
     try {
-      pi.sendMessage(
-        {
-          customType: "coms-inbound",
-          content: `[coms · from ${env.sender_name} · reply via coms_send target="${env.sender_name}" if needed]\n\n${env.prompt}`,
-          display: true,
-          details: {
-            msg_id: env.msg_id,
-            hops: env.hops,
-            sender_name: env.sender_name,
-          },
-        },
-        { deliverAs: "followUp", triggerTurn: true },
-      );
+      enqueueInbound({
+        msg_id: env.msg_id,
+        hops: env.hops,
+        sender_name: env.sender_name,
+        content: `[coms · from ${env.sender_name} · reply via coms_send target="${env.sender_name}" if needed]\n\n${env.prompt}`,
+      });
     } catch (err) {
       nack(socket, env.msg_id, "internal error");
       return;
@@ -1214,22 +1321,15 @@ export default function (pi: ExtensionAPI) {
     // fresh session's kickoff.
     lastRespawnRequestConversationId = env.conversation_id ?? null;
 
-    // Steer the receiver immediately; the receiver decides. Message-not-command:
-    // nothing is forced — the target agent chooses whether to call coms_respawn.
+    // The receiver decides. Message-not-command: nothing is forced — the
+    // target agent chooses whether to call coms_respawn.
     try {
-      pi.sendMessage(
-        {
-          customType: "coms-inbound",
-          content: `[coms · from ${env.sender_name}]\n\nPeer ${env.sender_name} requests that you respawn.${env.reason ? ` Reason: ${env.reason}` : ""} If you agree, call coms_respawn with a note.`,
-          display: true,
-          details: {
-            msg_id: env.msg_id,
-            hops: env.hops,
-            sender_name: env.sender_name,
-          },
-        },
-        { deliverAs: "followUp", triggerTurn: true },
-      );
+      enqueueInbound({
+        msg_id: env.msg_id,
+        hops: env.hops,
+        sender_name: env.sender_name,
+        content: `[coms · from ${env.sender_name}]\n\nPeer ${env.sender_name} requests that you respawn.${env.reason ? ` Reason: ${env.reason}` : ""} If you agree, call coms_respawn with a note.`,
+      });
     } catch (err) {
       nack(socket, env.msg_id, "internal error");
       return;
@@ -1311,6 +1411,89 @@ export default function (pi: ExtensionAPI) {
         msg_id: env.msg_id,
         sender: env.sender_name,
         hops: env.hops,
+      });
+    } catch {
+      // best-effort
+    }
+  }
+
+  // Interrupt: stop the current turn, drop the inbox, deliver one fresh prompt.
+  // The sender decides, like respawn_cold. One exception protects the human: a
+  // blocked agent (waiting on a dialog the human may be answering) is not
+  // aborted. Its inbox is still dropped and the notice runs once it settles.
+  function handleInterrupt(socket: net.Socket, env: InterruptEnvelope): void {
+    if (typeof env.hops !== "number" || env.hops >= MAX_HOPS) {
+      nack(socket, env.msg_id, "hops exceeded");
+      return;
+    }
+
+    const dropped = inbox.splice(0, inbox.length);
+    const busy = !canDeliverNow();
+    let aborted = false;
+    if (busy && !agentBlocked && !respawning && currentCtx) {
+      try {
+        currentCtx.abort();
+        aborted = true;
+      } catch {
+        /* fall through: the notice still runs once the turn ends */
+      }
+    }
+
+    const prompt =
+      typeof env.prompt === "string" && env.prompt.trim() ? env.prompt : null;
+    const content = formatInterruptNotice({
+      sender: env.sender_name,
+      prompt,
+      aborted,
+      dropped,
+    });
+
+    try {
+      if (prompt) {
+        // Front of the (now empty) inbox. Delivered at once when idle, else
+        // by pumpInbox on agent_settled after the abort lands.
+        inbox.unshift({
+          msg_id: env.msg_id,
+          hops: env.hops,
+          sender_name: env.sender_name,
+          content,
+        });
+        pumpInbox();
+      } else {
+        // No new work: record the notice without starting a turn. While a
+        // turn is still winding down, pi appends it after that turn ends.
+        pi.sendMessage(
+          {
+            customType: "coms-inbound",
+            content,
+            display: true,
+            details: {
+              msg_id: env.msg_id,
+              hops: env.hops,
+              sender_name: env.sender_name,
+            },
+          },
+          { triggerTurn: false },
+        );
+      }
+    } catch {
+      nack(socket, env.msg_id, "internal error");
+      return;
+    }
+
+    ackOk(socket, env.msg_id, {
+      aborted,
+      dropped: dropped.length,
+      blocked: busy && agentBlocked ? true : undefined,
+    });
+    try {
+      pi.appendEntry("coms-log", {
+        event: "inbound_interrupt",
+        msg_id: env.msg_id,
+        sender: env.sender_name,
+        hops: env.hops,
+        aborted,
+        dropped: dropped.map((d) => d.msg_id),
       });
     } catch {
       // best-effort
@@ -1792,6 +1975,8 @@ export default function (pi: ExtensionAPI) {
           handleRespawnRequest(socket, parsed as RespawnRequestEnvelope);
         } else if (parsed.type === "respawn_cold") {
           handleRespawnCold(socket, parsed as RespawnColdEnvelope);
+        } else if (parsed.type === "interrupt") {
+          handleInterrupt(socket, parsed as InterruptEnvelope);
         } else if (parsed.type === "status") {
           handleStatus(socket, parsed as unknown as StatusMessage);
         } else {
@@ -2260,6 +2445,13 @@ export default function (pi: ExtensionAPI) {
     }
     keepaliveTimer = setInterval(() => {
       if (!identity) return;
+      // Safety net for the inbox: agent_settled normally pumps it, but a pi
+      // build without that event (or a missed one) must not strand messages.
+      try {
+        pumpInbox();
+      } catch {
+        /* ignore */
+      }
       try {
         const ctx = currentCtx;
         // Detect missing-registry BEFORE writing so the self_heal audit only
@@ -3244,7 +3436,9 @@ export default function (pi: ExtensionAPI) {
     label: "Coms Send",
     description:
       "Send a message to a peer agent. Fire-and-forget: returns once the receiver acks delivery. " +
-      "The receiver is steered immediately and decides whether to reply via their own coms_send. " +
+      "An idle receiver starts a turn at once; a busy one gets it in its inbox, run when it is idle. " +
+      "The receiver decides whether to reply via their own coms_send. " +
+      "To replace stale orders, use coms_interrupt instead. " +
       "Throws if the receiver is unreachable.",
     parameters: Type.Object({
       target: Type.String({
@@ -3670,6 +3864,135 @@ export default function (pi: ExtensionAPI) {
         0,
       );
     },
+  });
+
+  // ━━ coms_interrupt ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Stop a peer and clear its backlog. The receiver does the work in
+  // handleInterrupt; the ack says what happened.
+
+  pi.registerTool({
+    name: "coms_interrupt",
+    label: "Coms Interrupt",
+    description:
+      "Stop a peer's current turn and drop every coms message still queued for it, then optionally " +
+      "give it one new prompt. Use when your earlier messages to the peer are stale, so it does not " +
+      "work through old orders. The peer is told who interrupted it and which queued messages were " +
+      "dropped. A peer blocked on a human dialog is not stopped; its queue is still dropped and the " +
+      "new prompt runs when the dialog ends. Without a prompt the peer stops and waits.",
+    parameters: Type.Object({
+      to: Type.String({
+        description:
+          "Peer name (preferred, scoped to your project) or session_id (global).",
+      }),
+      prompt: Type.Optional(
+        Type.String({
+          description:
+            "New instructions that replace whatever the peer was doing. Omit to just stop it.",
+        }),
+      ),
+    }),
+    async execute(_callId, params) {
+      if (!identity) {
+        throw new Error("coms not initialised");
+      }
+      const target = resolveTarget(params.to);
+      if (!target) {
+        throw new Error(`coms: no live agent matching "${params.to}"`);
+      }
+      if (target.session_id === identity.session_id) {
+        throw new Error("coms: cannot interrupt your own session");
+      }
+      const hops = currentInbound ? currentInbound.hops + 1 : 0;
+      if (hops >= MAX_HOPS) {
+        throw new Error(`coms: hop limit reached (${hops} >= ${MAX_HOPS})`);
+      }
+      const msg_id = ulid();
+      const env: InterruptEnvelope = {
+        type: "interrupt",
+        msg_id,
+        sender_session: identity.session_id,
+        sender_endpoint: identity.endpoint,
+        sender_name: identity.name,
+        sender_cwd: identity.cwd,
+        hops,
+        timestamp: nowIso(),
+        prompt: params.prompt ?? null,
+      };
+
+      const resp = (await sendEnvelope(target.endpoint, env)) as any;
+      const aborted = resp?.aborted === true;
+      const dropped = typeof resp?.dropped === "number" ? resp.dropped : 0;
+      const blocked = resp?.blocked === true;
+      try {
+        pi.appendEntry("coms-log", {
+          event: "outbound_interrupt",
+          msg_id,
+          target: target.name,
+          aborted,
+          dropped,
+          hops,
+        });
+      } catch {
+        /* best-effort */
+      }
+
+      const state = aborted
+        ? "turn stopped"
+        : blocked
+          ? "blocked on a dialog, not stopped"
+          : "was idle";
+      const text = `coms_interrupt → ${target.name}: ${state}, dropped ${dropped} queued`;
+      return {
+        content: [{ type: "text" as const, text }],
+        details: {
+          msg_id,
+          target: target.name,
+          target_session: target.session_id,
+          aborted,
+          dropped,
+          blocked,
+          hops,
+        },
+      };
+    },
+    renderCall(args, theme) {
+      const tgt = (args as any).to ?? "?";
+      const prompt = (args as any).prompt ?? "";
+      const preview = prompt.length > 60 ? prompt.slice(0, 57) + "..." : prompt;
+      return new Text(
+        theme.fg("toolTitle", theme.bold("coms_interrupt ")) +
+          theme.fg("accent", tgt) +
+          (preview
+            ? theme.fg("dim", " — ") + theme.fg("muted", preview)
+            : ""),
+        0,
+        0,
+      );
+    },
+    renderResult(result, _options, theme) {
+      const d = result.details as any;
+      if (!d) {
+        const t = result.content[0];
+        return new Text(t?.type === "text" ? t.text : "", 0, 0);
+      }
+      const state = d.aborted ? "stopped" : d.blocked ? "blocked" : "idle";
+      return new Text(
+        theme.fg("warning", "■ ") +
+          theme.fg("accent", d.target) +
+          theme.fg("dim", `  ${state}, dropped ${d.dropped}`),
+        0,
+        0,
+      );
+    },
+  });
+
+  // ━━ agent_settled: deliver the next inbox item ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // agent_settled is pi's final-idle signal (agent_end is not: retries and
+  // queued work can follow it). A run started from here is deferred by pi until
+  // every settled handler is done, so this cannot race other handlers.
+  pi.on("agent_settled", async () => {
+    if (!identity) return;
+    pumpInbox();
   });
 
   // ━━ agent_start: arm currentInbound for hop-count inheritance ━━━━━━━━━━━━━━

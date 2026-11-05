@@ -182,6 +182,7 @@ if (fs.existsSync(PROBE_OUT)) {
     "coms_respawn",
     "coms_cold_respawn",
     "coms_request_respawn",
+    "coms_interrupt",
   ]) {
     check(`tool present: ${tool}`, tools.includes(tool), `tools=${tools.join(",")}`);
   }

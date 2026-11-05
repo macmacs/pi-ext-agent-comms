@@ -63,7 +63,8 @@ Each peer reads its identity (name, color, model, tool budget) from
 `roles/`, so you can add your own roles or replace a shipped one.
 
 - Tools: `coms_list` (peers and status), `coms_send` (prompt a peer, await its
-  reply), plus the respawn tools.
+  reply), `coms_interrupt` (stop a peer and drop its queued messages), plus the
+  respawn tools. A message to a busy peer waits in its inbox until it is idle.
 - TUI: `/coms` opens the pool view, `%agent` talks to one peer directly, Ctrl+O
   expands message details.
 - Models: `/coms-models` lists each role's model. `/coms-models set builder

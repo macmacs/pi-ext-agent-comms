@@ -47,6 +47,7 @@ Tools:
 
 - `coms_list` - list peers with live status and idle time
 - `coms_send` - send a prompt to a peer and await its reply
+- `coms_interrupt` - stop a peer and drop its queued messages (see below)
 - plus the respawn tools below
 
 TUI:
@@ -78,6 +79,41 @@ markdown, so the two never collide.
 
 `coms_send` and friends still accept a leading `@` on a target name for
 back-compat, so old transcripts keep working.
+
+## Inbox and interrupt
+
+A coms message that reaches a busy peer waits in the peer's **inbox**. The
+inbox is held by coms, not by pi. When the peer settles (pi's `agent_settled`
+event), coms starts one new turn with the oldest message. The keepalive tick
+(every `PI_COMS_PING_INTERVAL_MS`) pumps it too, as a safety net.
+
+Why coms holds it: pi's follow-up queue cannot be cleared by an extension.
+Once a message is in there, the peer runs it, however stale it is. So an
+old order sent before the plan changed still ran, one after the other.
+
+`coms_interrupt` fixes that. The receiver:
+
+1. drops every message in its inbox, unread,
+2. aborts its current turn (like Esc),
+3. with a `prompt`: runs one new turn with a notice plus the prompt. Without
+   one: stores the notice and waits.
+
+The notice says who interrupted, whether a turn was stopped, and which
+messages were dropped (sender and msg id), so the peer can ask if one still
+matters. The ack tells the caller what happened:
+
+```
+coms_interrupt -> builder: turn stopped, dropped 2 queued
+coms_interrupt -> builder: was idle, dropped 0 queued
+coms_interrupt -> builder: blocked on a dialog, not stopped, dropped 1 queued
+```
+
+A peer **blocked** on a human dialog (for example `ask_user_question`) is not
+aborted, so the human's answer is not lost. Its inbox is still dropped, and the
+new prompt runs when the dialog ends.
+
+`tests/coms-interrupt.mjs` checks all of this against a real pi with a fake
+model server, so it needs no credentials.
 
 ## Respawn and cold respawn
 

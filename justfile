@@ -39,7 +39,7 @@ backoffice_fallback := home_directory() / "repos/backoffice"
 #
 # Keep this list boring: file edits, shell, task tracking, asking the human, and
 # talking to peers. A role that needs web, tickets or a sandbox says so itself.
-tools_core := "read,bash,edit,write,todo,ask_user_question,coms_send,coms_list,coms_respawn,coms_cold_respawn,coms_request_respawn,ctx_search,process"
+tools_core := "read,bash,edit,write,todo,ask_user_question,coms_send,coms_list,coms_respawn,coms_cold_respawn,coms_request_respawn,coms_interrupt,ctx_search,process"
 
 # Denylist fallback for `just lean` (your own session, not a role peer). See
 # the `lean` recipe for what is deliberately KEPT.
@@ -101,6 +101,7 @@ check: _node-modules
     node tests/coms-setup-realpi.mjs
     node tests/coms-roundtrip.mjs
     node tests/coms-respawn.mjs
+    node tests/coms-interrupt.mjs
     node tests/coms-settings.mjs
     node tests/coms-models.mjs
     echo "→ check clean"

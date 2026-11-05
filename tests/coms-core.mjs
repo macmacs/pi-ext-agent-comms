@@ -393,6 +393,28 @@ check(
   coms.poolLeaderSelection("n", -1, 0) === null && coms.poolLeaderSelection("h", 0, 3) === null,
 );
 
+// ━━ interrupt notice ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+{
+  const withPrompt = coms.formatInterruptNotice({
+    sender: "orchestrator",
+    prompt: "Do X instead.",
+    aborted: true,
+    dropped: [
+      { msg_id: "A1", sender_name: "orchestrator" },
+      { msg_id: "B2", sender_name: "scribe" },
+    ],
+  });
+  check("interrupt notice: header names the sender and reply target", withPrompt.startsWith('[coms · INTERRUPT from orchestrator · reply via coms_send target="orchestrator"'));
+  check("interrupt notice: says the turn was stopped", withPrompt.includes("stopped your turn"));
+  check("interrupt notice: lists every dropped message", withPrompt.includes("Dropped 2 queued") && withPrompt.includes("orchestrator (A1)") && withPrompt.includes("scribe (B2)"));
+  check("interrupt notice: new prompt comes last", withPrompt.trimEnd().endsWith("Do X instead."));
+
+  const bare = coms.formatInterruptNotice({ sender: "orch", prompt: null, aborted: false, dropped: [] });
+  check("interrupt notice: idle and empty says interrupted, no drop line", bare.includes("orch interrupted you.") && !bare.includes("Dropped"));
+  check("interrupt notice: no prompt means wait", bare.trimEnd().endsWith("Wait for new instructions.") && !bare.includes("reply via"));
+}
+
 // ━━ summary ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 console.log(`\n${passed} checks passed, ${failures.length} failed`);

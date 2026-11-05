@@ -21,7 +21,7 @@ pi -e extensions/coms.ts --cname prod --project myteam   # another terminal
 ```
 
 Tools: `coms_list` (list peers), `coms_send` (prompt a peer, await the reply),
-plus the respawn tools. TUI: `/coms` pool view, `%agent` direct interaction.
+`coms_interrupt` (stop a peer, drop its queued messages), plus the respawn tools. TUI: `/coms` pool view, `%agent` direct interaction.
 
 ## Example prompts (from the Pi to Pi video)
 
@@ -155,6 +155,7 @@ This repo takes the flags-in-recipes route, because role peers all launch in
 | `pi.sendMessage()` | Extensions | Extension drives the LLM (extension commands) |
 | `pi.events` | Extensions | Inter-extension event bus in one process |
 | `coms_send` | coms tools | Peer-to-peer prompts with await |
+| `coms_interrupt` | coms tools | Stop a peer, drop its stale queued prompts |
 
 ## Sources
 
